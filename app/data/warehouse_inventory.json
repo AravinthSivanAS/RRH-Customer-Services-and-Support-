@@ -1,0 +1,133 @@
+{
+  "inventory_last_updated": "2026-10-27T06:30:00Z",
+  "stores": [
+    {
+      "store_id": "STORE-LEEDS-CENTRAL",
+      "store_name": "Leeds Central"
+    },
+    {
+      "store_id": "STORE-LEEDS-NORTH",
+      "store_name": "Leeds North"
+    },
+    {
+      "store_id": "STORE-BRADFORD-CENTRAL",
+      "store_name": "Bradford Central"
+    }
+  ],
+  "products": [
+    {
+      "sku_id": "SKU-MEADOW-LF-1L",
+      "product_name": "Meadow Lactose-Free Milk 1L",
+      "brand": "Meadow",
+      "category": "Milk",
+      "unit_price": 3.49,
+      "product_location": {
+        "zone": "Chilled",
+        "aisle": "A12",
+        "bay": "B04",
+        "shelf": "S02"
+      },
+      "current_stock_status": "PARTIALLY_AVAILABLE",
+      "stock_by_store": {
+        "Leeds Central": 0,
+        "Leeds North": 18,
+        "Bradford Central": 9
+      }
+    },
+    {
+      "sku_id": "SKU-MEADOW-LF-2L",
+      "product_name": "Meadow Lactose-Free Milk 2L",
+      "brand": "Meadow",
+      "category": "Milk",
+      "unit_price": 3.49,
+      "product_location": {
+        "zone": "Chilled",
+        "aisle": "A12",
+        "bay": "B04",
+        "shelf": "S03"
+      },
+      "current_stock_status": "IN_STOCK",
+      "stock_by_store": {
+        "Leeds Central": 7,
+        "Leeds North": 11,
+        "Bradford Central": 6
+      }
+    },
+    {
+      "sku_id": "SKU-MEADOW-LF-6X200ML",
+      "product_name": "Meadow Lactose-Free Milk 6 x 200ml",
+      "brand": "Meadow",
+      "category": "Milk",
+      "unit_price": 3.49,
+      "product_location": {
+        "zone": "Chilled",
+        "aisle": "A12",
+        "bay": "B05",
+        "shelf": "S01"
+      },
+      "current_stock_status": "IN_STOCK",
+      "stock_by_store": {
+        "Leeds Central": 4,
+        "Leeds North": 8,
+        "Bradford Central": 3
+      }
+    },
+    {
+      "sku_id": "SKU-YACY-LF-1L",
+      "product_name": "Yacy Lactose-Free Milk 1L",
+      "brand": "Yacy",
+      "category": "Milk",
+      "unit_price": 2.99,
+      "product_location": {
+        "zone": "Chilled",
+        "aisle": "A12",
+        "bay": "B06",
+        "shelf": "S02"
+      },
+      "current_stock_status": "IN_STOCK",
+      "stock_by_store": {
+        "Leeds Central": 20,
+        "Leeds North": 16,
+        "Bradford Central": 13
+      }
+    },
+    {
+      "sku_id": "SKU-YACY-WHITE-BREAD",
+      "product_name": "Yacy Soft White Bread",
+      "brand": "Yacy",
+      "category": "Bakery",
+      "unit_price": 1.50,
+      "product_location": {
+        "zone": "Bakery",
+        "aisle": "B03",
+        "bay": "B02",
+        "shelf": "S01"
+      },
+      "current_stock_status": "IN_STOCK",
+      "stock_by_store": {
+        "Leeds Central": 25,
+        "Leeds North": 19,
+        "Bradford Central": 14
+      }
+    },
+    {
+      "sku_id": "SKU-FARM-EGGS-12",
+      "product_name": "Farm Fresh Eggs 12 Pack",
+      "brand": "Farm Fresh",
+      "category": "Eggs",
+      "unit_price": 2.90,
+      "product_location": {
+        "zone": "Chilled",
+        "aisle": "A09",
+        "bay": "B01",
+        "shelf": "S02"
+      },
+      "current_stock_status": "IN_STOCK",
+      "stock_by_store": {
+        "Leeds Central": 15,
+        "Leeds North": 10,
+        "Bradford Central": 12
+      }
+    }
+  ]
+}

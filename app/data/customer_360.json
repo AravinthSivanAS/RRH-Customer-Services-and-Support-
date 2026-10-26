@@ -1,0 +1,112 @@
+[
+  {
+    "customer_id": "CUST-1001",
+    "customer_name": "Maya",
+    "customer_since": "2019-04-12",
+    "loyalty_tier": "Gold",
+    "contact_details": {
+      "email": "maya@example.com",
+      "mobile": "+44-7700-900101",
+      "preferred_contact_channel": "whatsapp",
+      "whatsapp_opt_in": true,
+      "email_opt_in": true,
+      "sms_opt_in": false
+    },
+    "address": {
+      "address_line_1": "24 Meadow Lane",
+      "city": "Leeds",
+      "postal_code": "LS1 4AB",
+      "country": "United Kingdom",
+      "latitude": 53.8008,
+      "longitude": -1.5491
+    },
+    "preferred_store_id": "STORE-LEEDS-CENTRAL",
+    "household": {
+      "household_size": 3,
+      "has_children": true
+    },
+    "preferences": {
+      "allow_preference_based_recommendations": true,
+      "allow_substitution_contact": true,
+      "dietary_requirements": [
+        "lactose-free"
+      ],
+      "product_preferences": [
+        {
+          "product_category": "Milk",
+          "preferred_product_name": "Meadow Lactose-Free Milk 1L",
+          "preferred_brand": "Meadow",
+          "preferred_sku_id": "SKU-MEADOW-LF-1L",
+          "substitution_rule": "SAME_BRAND_OR_ASK",
+          "price_increase_limit_percentage": 0,
+          "notes": "Maya's son only drinks Meadow lactose-free milk."
+        }
+      ]
+    },
+    "recent_products": [
+      {
+        "sku_id": "SKU-MEADOW-LF-1L",
+        "product_name": "Meadow Lactose-Free Milk 1L",
+        "category": "Milk",
+        "brand": "Meadow",
+        "last_ordered_date": "2026-10-25",
+        "order_frequency": "weekly",
+        "usual_quantity": 1,
+        "preferred": true
+      },
+      {
+        "sku_id": "SKU-YACY-WHITE-BREAD",
+        "product_name": "Yacy Soft White Bread",
+        "category": "Bakery",
+        "brand": "Yacy",
+        "last_ordered_date": "2026-10-25",
+        "order_frequency": "weekly",
+        "usual_quantity": 1,
+        "preferred": false
+      },
+      {
+        "sku_id": "SKU-FARM-EGGS-12",
+        "product_name": "Farm Fresh Eggs 12 Pack",
+        "category": "Eggs",
+        "brand": "Farm Fresh",
+        "last_ordered_date": "2026-10-25",
+        "order_frequency": "weekly",
+        "usual_quantity": 1,
+        "preferred": false
+      }
+    ],
+    "active_order": {
+      "order_id": "ORD-2026-10001",
+      "order_date": "2026-10-25",
+      "delivery_date": "2026-10-27",
+      "delivery_slot": "18:00-20:00",
+      "fulfilment_store_id": "STORE-LEEDS-CENTRAL",
+      "status": "PICKING",
+      "payment_status": "AUTHORIZED",
+      "currency": "GBP",
+      "items": [
+        {
+          "sku_id": "SKU-MEADOW-LF-1L",
+          "product_name": "Meadow Lactose-Free Milk 1L",
+          "quantity": 1,
+          "unit_price": 3.49,
+          "item_status": "PENDING_PICK"
+        },
+        {
+          "sku_id": "SKU-YACY-WHITE-BREAD",
+          "product_name": "Yacy Soft White Bread",
+          "quantity": 1,
+          "unit_price": 1.50,
+          "item_status": "PENDING_PICK"
+        },
+        {
+          "sku_id": "SKU-FARM-EGGS-12",
+          "product_name": "Farm Fresh Eggs 12 Pack",
+          "quantity": 1,
+          "unit_price": 2.90,
+          "item_status": "PENDING_PICK"
+        }
+      ]
+    }
+  }
+]

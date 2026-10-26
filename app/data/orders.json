@@ -1,0 +1,45 @@
+[
+  {
+    "order_id": "ORD-2026-10001",
+    "customer_id": "CUST-1001",
+    "order_date": "2026-10-25",
+    "delivery_date": "2026-10-27",
+    "delivery_slot": "18:00-20:00",
+    "fulfilment_store_id": "STORE-LEEDS-CENTRAL",
+    "status": "PICKING",
+    "payment_status": "AUTHORIZED",
+    "currency": "GBP",
+    "items": [
+      {
+        "sku_id": "SKU-MEADOW-LF-1L",
+        "product_name": "Meadow Lactose-Free Milk 1L",
+        "quantity": 1,
+        "unit_price": 3.49,
+        "item_status": "PENDING_PICK",
+        "substitution_reason": null,
+        "decision_source": null,
+        "original_sku_id": null
+      },
+      {
+        "sku_id": "SKU-YACY-WHITE-BREAD",
+        "product_name": "Yacy Soft White Bread",
+        "quantity": 1,
+        "unit_price": 1.50,
+        "item_status": "PENDING_PICK",
+        "substitution_reason": null,
+        "decision_source": null,
+        "original_sku_id": null
+      },
+      {
+        "sku_id": "SKU-FARM-EGGS-12",
+        "product_name": "Farm Fresh Eggs 12 Pack",
+        "quantity": 1,
+        "unit_price": 2.90,
+        "item_status": "PENDING_PICK",
+        "substitution_reason": null,
+        "decision_source": null,
+        "original_sku_id": null
+      }
+    ]
+  }
+]
