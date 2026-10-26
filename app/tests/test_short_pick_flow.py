@@ -134,6 +134,26 @@ def test_no_eligible_alternative_creates_human_assistance_case(client):
     assert body["next_action"] == "WAIT_FOR_CUSTOMER_RESOLUTION_CHOICE"
 
 
+def test_no_meadow_scenario_setup_uses_backend_rules_and_resets(client):
+    setup = client.post("/api/demo/scenarios/no-meadow")
+    assert setup.status_code == 200
+    assert setup.json()["unavailable_skus"] == [
+        "SKU-MEADOW-LF-2L",
+        "SKU-MEADOW-LF-6X200ML",
+    ]
+
+    response = client.post("/api/events/short-pick", json=short_pick_payload())
+    body = response.json()
+    assert response.status_code == 200
+    assert body["decision"]["outcome"] == "HUMAN_ASSISTANCE_REQUIRED"
+    assert body["decision"]["valid_alternatives"] == []
+
+    reset = client.post("/api/demo/reset")
+    assert reset.status_code == 200
+    restored = client.get(f"/api/inventory/SKU-MEADOW-LF-2L/stores/{STORE_ID}")
+    assert restored.json()["available_quantity"] == 7
+
+
 def test_reset_endpoint_restores_original_demo_data(client):
     product = data_store.find_product("SKU-MEADOW-LF-2L")
     product["stock_by_store"]["Leeds Central"] = 0

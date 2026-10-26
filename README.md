@@ -140,6 +140,13 @@ Replay the full audit trail for the order:
 curl http://localhost:8000/api/orders/ORD-2026-10001/timeline
 ```
 
+Prepare the controlled "no Meadow alternatives at Leeds Central" demo scenario
+(call `/api/demo/reset` first when switching back to the default scenario):
+
+```bash
+curl -X POST http://localhost:8000/api/demo/scenarios/no-meadow
+```
+
 Reset the demo data back to its seeded state:
 
 ```bash
@@ -170,6 +177,30 @@ curl -X POST http://localhost:8000/api/demo/reset
    repeat step 2 — the response outcome becomes `HUMAN_ASSISTANCE_REQUIRED`
    with mock wallet-credit / refund options.
 9. `POST /api/demo/reset` — restore the original dataset for the next run.
+
+The `POST /api/demo/scenarios/no-meadow` demo setup sets the two seeded Meadow
+replacement SKUs to zero stock at Leeds Central in memory. The regular short-pick
+and substitution decision logic remains unchanged; resetting restores seeded stock.
+
+## NEAR frontend foundation
+
+The React + TypeScript/Vite app is in `frontend/`. Start the FastAPI server using
+the instructions above, then run:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite development server proxies `/health` and `/api` to FastAPI at
+`http://127.0.0.1:8000`, avoiding browser CORS configuration changes. Run
+`npm run typecheck` and `npm run build` from `frontend/` to validate the app.
+
+Maya's phone journey starts with saving her existing substitution preference,
+then reviews the seeded basket and shows a WhatsApp-style order confirmation.
+Only after that confirmation does the out-of-stock notification trigger the
+backend short-pick flow. The happy and no-Meadow scenarios share these steps.
 
 ## Assumptions and limitations
 
