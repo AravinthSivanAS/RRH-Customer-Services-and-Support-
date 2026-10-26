@@ -19,6 +19,7 @@ const ORIGINAL_SKU = "SKU-MEADOW-LF-1L";
 
 type Scenario = "available" | "none";
 type Stage =
+  | "welcome"
   | "basket"
   | "order-confirmation"
   | "lock"
@@ -89,7 +90,7 @@ interface CaseData {
 
 const initialState: JourneyState = {
   scenario: "available",
-  stage: "preferences",
+  stage: "welcome",
   history: [],
   caseDetails: null,
   notification: null,
@@ -346,6 +347,7 @@ export default function App() {
   const [reply, setReply] = useState("");
   const [feedback, setFeedback] = useState<"yes" | "no" | null>(null);
   const resolved = state.caseDetails?.resolved === true;
+  const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
 
   const refreshDashboard = useCallback(async () => {
@@ -543,13 +545,25 @@ export default function App() {
 
       {state.mutation === "scenario" && <span className="sr-only" role="status">Preparing scenario</span>}
 
-      <section className="products" aria-label="Customer and service experience">
+      <section className={`products ${showMarcus ? "products--with-marcus" : "products--phone-only"}`} aria-label="Customer and service experience">
         <section className="maya-column">
           <h1 className="panel-label">Maya</h1>
           <div className="phone-frame">
             <div className="phone-screen">
               <div className="phone-notch" />
-              <div className="phone-status"><strong>{state.stage === "tracking" ? "17:30" : state.stage === "delivered" || state.stage === "feedback" ? "18:40" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
+              <div className="phone-status"><strong>{state.stage === "tracking" ? "17:30" : state.stage === "delivered" || state.stage === "feedback" ? "18:40" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "welcome" ? "19:11" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
+
+              {state.stage === "welcome" && (
+                <div className="welcome-screen">
+                  <div className="welcome-date">Tuesday</div>
+                  <div className="welcome-time">19:11</div>
+                  <button className="push-notification welcome-notification" onClick={() => navigate("preferences")}>
+                    <Logo compact />
+                    <span><strong>Yacy · Your basket is ready</strong><small>Take a look at your basket and choose what’s right for you.</small></span>
+                    <time>now</time>
+                  </button>
+                </div>
+              )}
 
               {state.stage === "lock" && (
                 <div className="lock-screen">
@@ -564,7 +578,7 @@ export default function App() {
                 </div>
               )}
 
-              {state.stage !== "lock" && (
+              {state.stage !== "lock" && state.stage !== "welcome" && (
                 <PhoneExperience
                   state={state}
                   originalPrice={originalItem?.unit_price ?? 3.49}
@@ -584,18 +598,21 @@ export default function App() {
           </div>
         </section>
 
-        <div className="sync-mark" aria-hidden="true">↔</div>
-
-        <section className="marcus-column" aria-label="Marcus service console">
-          <h2 className="panel-label">Marcus</h2>
-          <ServiceConsole
-            state={state}
-            onChooseResolution={(choice) => void chooseResolution(choice)}
-            reply={reply}
-            setReply={setReply}
-            onSendReply={sendMarcusReply}
-          />
-        </section>
+        {showMarcus && (
+          <>
+            <div className="sync-mark" aria-hidden="true">↔</div>
+            <section className="marcus-column" aria-label="Marcus service console">
+              <h2 className="panel-label">Marcus</h2>
+              <ServiceConsole
+                state={state}
+                onChooseResolution={(choice) => void chooseResolution(choice)}
+                reply={reply}
+                setReply={setReply}
+                onSendReply={sendMarcusReply}
+              />
+            </section>
+          </>
+        )}
       </section>
     </main>
   );

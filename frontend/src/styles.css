@@ -31,6 +31,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; padding: 9px 12px; border: 1px solid #ecd8a9; border-radius: 8px; background: #fff9e9; color: #70551d; font-size: 11px; }
 .error-banner button { padding: 5px 9px; border: 1px solid #e7d9b9; border-radius: 6px; background: white; cursor: pointer; font-size: 10px; }
 .products { display: grid; grid-template-columns: minmax(300px, 380px) 38px minmax(600px, 1fr); align-items: stretch; gap: 14px; }
+.products--phone-only { display: flex; justify-content: center; }
+.products--phone-only .maya-column { width: min(100%, 400px); }
 .maya-column, .marcus-column { display: flex; min-width: 0; flex-direction: column; align-items: center; }
 .panel-label { align-self: flex-start; margin: 0 0 9px 2px; color: #6f7972; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .sync-mark { display: grid; align-self: center; place-items: center; color: #9aa49c; font-size: 24px; }
@@ -42,6 +44,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .phone-status { z-index: 2; display: flex; height: 37px; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 8px 18px 0; background: white; color: #201d2c; font-size: 10px; }
 .phone-status strong { font-size: 11px; }
 .phone-status > span { letter-spacing: 1px; font-size: 10px; }
+.welcome-screen { display: flex; flex: 1; flex-direction: column; align-items: center; padding: 72px 18px 20px; background: #f8faf8; }
+.welcome-date { color: #68766c; font-size: 14px; font-weight: 600; }
+.welcome-time { margin: 4px 0 35px; color: #243a2d; font-size: clamp(68px, 8vw, 96px); font-weight: 300; letter-spacing: -.07em; line-height: 1; }
+.welcome-notification { margin-top: 0; }
 .lock-screen { display: flex; flex: 1; flex-direction: column; align-items: center; padding: 72px 18px 20px; background: linear-gradient(165deg, #e8f4eb 0%, #f8fbf8 65%, #eff7f0 100%); }
 .lock-date { color: #68766c; font-size: 14px; font-weight: 600; }
 .lock-time { margin: 4px 0 35px; color: #243a2d; font-size: clamp(68px, 8vw, 96px); font-weight: 300; letter-spacing: -.07em; line-height: 1; }
