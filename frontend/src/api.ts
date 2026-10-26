@@ -206,6 +206,17 @@ export interface NoMeadowSetupResponse {
   unavailable_skus: string[];
 }
 
+export interface GenerateMessageRequest {
+  kind: string;
+  context?: Record<string, unknown>;
+  fallback: string;
+}
+
+export interface GenerateMessageResponse {
+  message: string;
+  source: "llm" | "fallback";
+}
+
 export interface SubstitutionSelectionRequest {
   customer_id: string;
   original_sku_id: string;
@@ -325,5 +336,10 @@ export const api = {
   prepareNoMeadowScenario: () =>
     request<NoMeadowSetupResponse>("/api/demo/scenarios/no-meadow", {
       method: "POST",
+    }),
+  generateMessage: (payload: GenerateMessageRequest) =>
+    request<GenerateMessageResponse>("/api/messages/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 };

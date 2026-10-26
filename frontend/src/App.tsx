@@ -83,6 +83,8 @@ interface CaseData {
   notification: NotificationResponse;
   order: OrderSnapshot;
   timeline: TimelineEntry[];
+  connectingMessage: string;
+  marcusGreeting: string;
 }
 
 const initialState: JourneyState = {
@@ -145,7 +147,7 @@ function reducer(state: JourneyState, action: Action): JourneyState {
               {
                 id: 2,
                 speaker: "yacy",
-                text: "I’m connecting you to Marcus from our care team.",
+                text: action.data.connectingMessage,
                 time: "06:46",
               },
               {
@@ -157,7 +159,7 @@ function reducer(state: JourneyState, action: Action): JourneyState {
               {
                 id: 4,
                 speaker: "marcus",
-                text: "Hi Maya, I can see your order and your Meadow preference. I’ll help you find the right solution.",
+                text: action.data.marcusGreeting,
                 time: "06:47",
               },
             ]
@@ -223,6 +225,10 @@ async function loadDashboard(): Promise<DashboardData> {
   return { customer, preferences, inventory, order };
 }
 
+const FALLBACK_ADVISOR_HANDOFF = "I’m connecting you to Marcus from our care team.";
+const FALLBACK_ADVISOR_GREETING =
+  "Hi Maya, I can see your order and your Meadow preference. I’ll help you find the right solution.";
+
 async function loadCaseData(notificationId: string): Promise<CaseData> {
   const [caseDetails, notification, order, timeline] = await Promise.all([
     api.substitutionOptions(ORDER_ID),
@@ -230,7 +236,30 @@ async function loadCaseData(notificationId: string): Promise<CaseData> {
     api.order(ORDER_ID),
     api.timeline(ORDER_ID),
   ]);
-  return { caseDetails, notification, order, timeline };
+
+  let connectingMessage = FALLBACK_ADVISOR_HANDOFF;
+  let marcusGreeting = FALLBACK_ADVISOR_GREETING;
+
+  if (caseDetails.outcome === "HUMAN_ASSISTANCE_REQUIRED") {
+    const context = {
+      customer_name: "Maya",
+      order_id: ORDER_ID,
+      rule_applied: caseDetails.rule_applied,
+      routing_reason: caseDetails.human_assistance?.routing_reason,
+    };
+    [connectingMessage, marcusGreeting] = await Promise.all([
+      api
+        .generateMessage({ kind: "ADVISOR_HANDOFF_NOTICE", context, fallback: FALLBACK_ADVISOR_HANDOFF })
+        .then((result) => result.message)
+        .catch(() => FALLBACK_ADVISOR_HANDOFF),
+      api
+        .generateMessage({ kind: "ADVISOR_GREETING", context, fallback: FALLBACK_ADVISOR_GREETING })
+        .then((result) => result.message)
+        .catch(() => FALLBACK_ADVISOR_GREETING),
+    ]);
+  }
+
+  return { caseDetails, notification, order, timeline, connectingMessage, marcusGreeting };
 }
 
 function errorDetails(error: unknown) {
@@ -273,6 +302,43 @@ function orderTotal(order: OrderSnapshot) {
 
 function makeMessage(speaker: Speaker, text: string): ChatMessage {
   return { id: Date.now() + Math.random(), speaker, text, time: currentTime() };
+}
+
+/**
+ * Fetches LLM-generated customer-facing wording for a given message `kind`.
+ * Reports `isPending` while the request for the *current* key is in flight,
+ * so callers can show a typing indicator instead of flashing the fallback
+ * text and then swapping it out. Always resolves to `fallback` if the
+ * backend/LLM call fails, so the demo narrative never gets stuck.
+ */
+function useGeneratedMessage(
+  kind: string,
+  context: Record<string, unknown>,
+  fallback: string,
+  skip = false,
+): { text: string; isPending: boolean } {
+  const key = `${kind}::${JSON.stringify(context)}`;
+  const [resolved, setResolved] = useState<{ key: string; text: string } | null>(null);
+
+  useEffect(() => {
+    if (skip) return;
+    let cancelled = false;
+    api
+      .generateMessage({ kind, context, fallback })
+      .then((result) => {
+        if (!cancelled) setResolved({ key, text: result.message });
+      })
+      .catch(() => {
+        if (!cancelled) setResolved({ key, text: fallback });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, skip]);
+
+  const matched = resolved?.key === key;
+  return { text: matched ? resolved.text : fallback, isPending: !matched && !skip };
 }
 
 export default function App() {
@@ -594,9 +660,16 @@ function PhoneExperience({
         <div className="phone-appbar"><Logo compact /><strong>WhatsApp · 19:31</strong></div>
         <div className="order-confirmation-chat">
           <span className="day-stamp">TODAY</span>
-          <ChatBubble
+          <GeneratedChatBubble
             speaker="yacy"
-            text={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
+            kind="ORDER_CONFIRMATION"
+            context={{
+              customer_name: state.customer?.customer_name,
+              order_id: state.order.order_id,
+              delivery_date: formatDeliveryDate(state.order.delivery_date),
+              delivery_slot: formatSlot(state.order.delivery_slot),
+            }}
+            fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
             time="19:31"
           />
           <div className="order-confirmation-action">
@@ -696,9 +769,21 @@ function PhoneExperience({
         <div className="phone-appbar"><button onClick={onBack} aria-label="Back">‹</button><Logo compact /><div><strong>Yacy Assistant</strong><small>Virtual agent · usually replies instantly</small></div></div>
         <div className="assistant-messages">
           <ChatBubble speaker="maya" text="Can you always keep his milk to Meadow?" time="18:50" />
-          <ChatBubble speaker="yacy" text="Of course, Maya. I’ve saved Meadow only, or ask me for his milk on your profile — it will apply to every order. Shall I do the same for his yoghurt?" time="18:50" />
+          <GeneratedChatBubble
+            speaker="yacy"
+            kind="ASSISTANT_PREFERENCE_ACK"
+            context={{ preferred_brand: "Meadow", product_category: "Milk" }}
+            fallback="Of course, Maya. I’ve saved Meadow only, or ask me for his milk on your profile — it will apply to every order. Shall I do the same for his yoghurt?"
+            time="18:50"
+          />
           <ChatBubble speaker="maya" text="Yes please" time="18:51" />
-          <ChatBubble speaker="yacy" text="Done ✓ Milk and yoghurt." time="18:51" />
+          <GeneratedChatBubble
+            speaker="yacy"
+            kind="ASSISTANT_PREFERENCE_DONE"
+            context={{ preferred_brand: "Meadow", items: ["Milk", "yoghurt"] }}
+            fallback="Done ✓ Milk and yoghurt."
+            time="18:51"
+          />
           <span className="saved-chip">✓ Preferences updated</span>
         </div>
         <div className="composer"><input aria-label="Ask about your orders" placeholder="Ask anything about your orders…" /><button aria-label="Send">↑</button></div>
@@ -711,13 +796,27 @@ function PhoneExperience({
       <div className="phone-app chat-app">
         <PhoneChatHeader onNavigate={onNavigate} onBack={onBack} />
         <div className="chat-history">
-          <ChatBubble speaker="yacy" text="Your order has been delivered. Was today’s swap right for you?" time="18:51" />
+          <GeneratedChatBubble
+            speaker="yacy"
+            kind="DELIVERED_FEEDBACK_PROMPT"
+            context={{}}
+            fallback="Your order has been delivered. Was today’s swap right for you?"
+            time="18:51"
+          />
           <div className="customer-actions">
             <button className={feedbackSelection === "yes" ? "chosen" : ""} onClick={() => onFeedback("yes")} disabled={Boolean(feedbackSelection)}>👍 Yes</button>
             <button className={feedbackSelection === "no" ? "chosen" : ""} onClick={() => onFeedback("no")} disabled={Boolean(feedbackSelection)}>👎 No</button>
           </div>
           {feedbackSelection && <ChatBubble speaker="maya" text={feedbackSelection === "yes" ? "👍 Yes" : "👎 No"} time="18:52" />}
-          {feedbackSelection && <ChatBubble speaker="yacy" text="Thank you! We’ll remember that." time="18:52" />}
+          {feedbackSelection && (
+            <GeneratedChatBubble
+              speaker="yacy"
+              kind="FEEDBACK_THANKS"
+              context={{ feedback: feedbackSelection }}
+              fallback="Thank you! We’ll remember that."
+              time="18:52"
+            />
+          )}
         </div>
         <PhoneComposer />
       </div>
@@ -773,16 +872,61 @@ function PhoneExperience({
             ))}
           </div>
         )}
-        {showConfirmation && (
-          <>
-            <ChatBubble speaker={assistance ? "marcus" : "yacy"} text={assistance ? "Your choice is recorded. I’ve updated the case." : "Great choice. Updating your order now…"} time={currentTime()} />
-            {state.notification?.responded_sku_id && <ChatBubble speaker="yacy" text={`${state.order?.items.find((item) => item.sku_id === state.notification?.responded_sku_id)?.product_name ?? "Your Meadow replacement"} is added to your order.`} time={currentTime()} />}
-            {state.notification?.responded_resolution_choice && <ChatBubble speaker="yacy" text={state.notification.responded_resolution_choice === "WALLET_CREDIT" ? `${formatPrice(originalPrice)} added to your Yacy wallet.` : `Your ${formatPrice(originalPrice)} card refund is being processed.`} time={currentTime()} />}
-          </>
-        )}
+        {showConfirmation && (() => {
+          const swappedProductName = state.order?.items.find(
+            (item) => item.sku_id === state.notification?.responded_sku_id,
+          )?.product_name ?? "Your Meadow replacement";
+
+          const items: SequencedBubbleSpec[] = [
+            {
+              speaker: assistance ? "marcus" : "yacy",
+              kind: assistance ? "HUMAN_ASSISTANCE_CASE_UPDATE" : "SUBSTITUTION_CONFIRMATION_UPDATE",
+              context: {},
+              fallback: assistance
+                ? "Your choice is recorded. I’ve updated the case."
+                : "Great choice. Updating your order now…",
+              time: currentTime(),
+            },
+          ];
+
+          if (state.notification?.responded_sku_id) {
+            items.push({
+              speaker: "yacy",
+              kind: "SWAP_ADDED_CONFIRMATION",
+              context: { product_name: swappedProductName },
+              fallback: `${swappedProductName} is added to your order.`,
+              time: currentTime(),
+            });
+          }
+
+          if (state.notification?.responded_resolution_choice) {
+            items.push({
+              speaker: "yacy",
+              kind: "RESOLUTION_CONFIRMATION",
+              context: {
+                resolution_choice: state.notification.responded_resolution_choice,
+                amount: originalPrice,
+                currency: "GBP",
+              },
+              fallback:
+                state.notification.responded_resolution_choice === "WALLET_CREDIT"
+                  ? `${formatPrice(originalPrice)} added to your Yacy wallet.`
+                  : `Your ${formatPrice(originalPrice)} card refund is being processed.`,
+              time: currentTime(),
+            });
+          }
+
+          return <SequentialChatBubbles items={items} />;
+        })()}
         {state.stage === "delivered" && (
           <>
-            <ChatBubble speaker="yacy" text="Delivered — including your approved Meadow swap." time="18:40" />
+            <GeneratedChatBubble
+              speaker="yacy"
+              kind="DELIVERED_WITH_SWAP"
+              context={{}}
+              fallback="Delivered — including your approved Meadow swap."
+              time="18:40"
+            />
             <div className="customer-actions"><button onClick={() => onNavigate("feedback")}>👍 Yes</button><button onClick={() => onNavigate("feedback")}>👎 No</button></div>
           </>
         )}
@@ -835,6 +979,98 @@ function ChatBubble({ speaker, text, time }: { speaker: Speaker; text: string; t
       {speaker === "marcus" && <strong className="bubble-author">MARCUS</strong>}
       <p>{text}</p><span className="message-time">{time}{outgoing ? " ✓✓" : ""}</span>
     </div>
+  );
+}
+
+function TypingBubble({ speaker }: { speaker: Speaker }) {
+  const outgoing = speaker === "maya";
+  return (
+    <div
+      className={`chat-bubble chat-bubble--typing ${outgoing ? "chat-bubble--outgoing" : ""} ${speaker === "marcus" ? "chat-bubble--marcus" : ""}`}
+      aria-label="Typing…"
+      role="status"
+    >
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+/**
+ * A ChatBubble whose wording is generated on the fly by the backend's LLM
+ * endpoint, given a message `kind` and structured `context` facts. Shows a
+ * WhatsApp-style typing indicator while the request is in flight, then
+ * fades in the generated text (or `fallback`, if the LLM call failed) -
+ * never a visible text swap, and never stuck waiting forever.
+ *
+ * `onResolved` fires once, the moment this bubble's text is ready - used by
+ * `SequentialChatBubbles` to only reveal (and start generating) the next
+ * message once this one has actually finished, instead of every bubble in a
+ * group showing "typing…" at the same time.
+ */
+function GeneratedChatBubble({
+  speaker,
+  kind,
+  context,
+  fallback,
+  time,
+  onResolved,
+}: {
+  speaker: Speaker;
+  kind: string;
+  context: Record<string, unknown>;
+  fallback: string;
+  time: string;
+  onResolved?: () => void;
+}) {
+  const { text, isPending } = useGeneratedMessage(kind, context, fallback);
+
+  useEffect(() => {
+    if (!isPending) onResolved?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPending]);
+
+  if (isPending) return <TypingBubble speaker={speaker} />;
+  return <ChatBubble speaker={speaker} text={text} time={time} />;
+}
+
+interface SequencedBubbleSpec {
+  speaker: Speaker;
+  kind: string;
+  context: Record<string, unknown>;
+  fallback: string;
+  time: string;
+}
+
+/**
+ * Renders a group of GeneratedChatBubbles one at a time: the next bubble
+ * isn't even mounted (so its LLM call hasn't started) until the previous one
+ * has resolved, matching how a real person sends one WhatsApp message, waits,
+ * then sends the next - rather than every reply "typing" simultaneously.
+ */
+function SequentialChatBubbles({ items }: { items: SequencedBubbleSpec[] }) {
+  const sequenceKey = items.map((item) => `${item.kind}::${JSON.stringify(item.context)}`).join("|");
+  const [revealedCount, setRevealedCount] = useState(1);
+
+  useEffect(() => {
+    setRevealedCount(1);
+  }, [sequenceKey]);
+
+  return (
+    <>
+      {items.slice(0, revealedCount).map((item, index) => (
+        <GeneratedChatBubble
+          key={`${item.kind}-${index}`}
+          speaker={item.speaker}
+          kind={item.kind}
+          context={item.context}
+          fallback={item.fallback}
+          time={item.time}
+          onResolved={() => setRevealedCount((count) => Math.max(count, index + 2))}
+        />
+      ))}
+    </>
   );
 }
 

@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.models.event import AlternativeOption, ResolutionOption
 from app.repositories.json_repository import data_store
+from app.services import llm_service
 from app.services.audit_service import now_iso
 
 
@@ -22,9 +23,25 @@ def create_substitution_offer_notification(
 ) -> Dict[str, Any]:
     brand = original_product["brand"]
     count_text = "an option" if len(valid_alternatives) == 1 else f"{len(valid_alternatives)} options"
-    message = (
+    fallback_message = (
         f"Your {original_product['product_name']} is out of stock today. "
         f"Here are {count_text} at the same price."
+    )
+    message, _source = llm_service.generate_message(
+        kind="SUBSTITUTION_OFFER",
+        context={
+            "original_product_name": original_product["product_name"],
+            "original_brand": brand,
+            "alternatives": [
+                {
+                    "product_name": alt.product_name,
+                    "brand": alt.brand,
+                    "unit_price": alt.unit_price,
+                }
+                for alt in valid_alternatives
+            ],
+        },
+        fallback=fallback_message,
     )
     notification = {
         "notification_id": str(uuid.uuid4()),
@@ -56,10 +73,27 @@ def create_human_assistance_notification(
     original_product: Dict[str, Any],
     resolution_options: List[ResolutionOption],
 ) -> Dict[str, Any]:
-    message = (
+    fallback_message = (
         f"We couldn't find a matching {original_product['brand']} alternative for "
         f"{original_product['product_name']} in stock today. Choose a wallet credit or "
         f"a refund, and one of our advisors will confirm with you."
+    )
+    message, _source = llm_service.generate_message(
+        kind="HUMAN_ASSISTANCE",
+        context={
+            "original_product_name": original_product["product_name"],
+            "original_brand": original_product["brand"],
+            "resolution_options": [
+                {
+                    "type": opt.type,
+                    "amount": opt.amount,
+                    "currency": opt.currency,
+                    "description": opt.description,
+                }
+                for opt in resolution_options
+            ],
+        },
+        fallback=fallback_message,
     )
     notification = {
         "notification_id": str(uuid.uuid4()),

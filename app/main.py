@@ -3,9 +3,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from app.routers import customers, demo, events, inventory, notifications, orders
+from app.routers import customers, demo, events, inventory, messages, notifications, orders
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +39,7 @@ app.include_router(orders.router)
 app.include_router(events.router)
 app.include_router(notifications.router)
 app.include_router(demo.router)
+app.include_router(messages.router)
 
 
 @app.get("/health", tags=["health"])

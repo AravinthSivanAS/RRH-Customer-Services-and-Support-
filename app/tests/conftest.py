@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.repositories.json_repository import data_store
+from app.services import llm_service
 
 ORDER_ID = "ORD-2026-10001"
 CUSTOMER_ID = "CUST-1001"
@@ -17,6 +18,18 @@ def reset_data_store():
     data_store.reset_all()
     yield
     data_store.reset_all()
+
+
+@pytest.fixture(autouse=True)
+def no_live_llm_calls(monkeypatch):
+    """Tests must stay fast, free, and offline: never hit a real LLM provider,
+    regardless of what's configured in .env. Always exercise the deterministic
+    fallback path that ships with every message kind."""
+
+    def _fallback_only(kind, context, fallback):
+        return fallback, "fallback"
+
+    monkeypatch.setattr(llm_service, "generate_message", _fallback_only)
 
 
 @pytest.fixture
