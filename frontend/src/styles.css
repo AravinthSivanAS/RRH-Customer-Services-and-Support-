@@ -110,7 +110,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .option-check { grid-column: 2; width: fit-content; padding: 3px 5px; border-radius: 5px; background: #e2f6e9; color: #287442; font-size: 8px; }
 .customer-actions { display: grid; gap: 5px; }
 .customer-actions button, .resolution-chat-actions button { min-height: 32px; border: 1px solid #e2e4e1; border-radius: 8px; background: white; color: #0087bd; cursor: pointer; font-size: 11px; font-weight: 700; }
-.customer-actions button.chosen { border-color: #0c9cca; background: #effaff; }
+.customer-actions button.chosen, .resolution-chat-actions button.chosen { border-color: #0c9cca; background: #effaff; }
 .resolution-chat-actions { display: grid; gap: 6px; padding: 9px; border-radius: 9px; background: white; }
 .resolution-chat-actions p { margin: 0 0 2px; color: #5f6a62; font-size: 10px; }
 .resolution-chat-actions button { display: flex; align-items: center; justify-content: space-between; padding: 0 9px; color: #087c48; font-size: 9px; }

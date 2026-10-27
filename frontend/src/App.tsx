@@ -74,7 +74,7 @@ type Action =
   | { type: "back" }
   | { type: "short-pick-complete"; data: CaseData }
   | { type: "case-refreshed"; data: CaseData }
-  | { type: "response-complete"; data: CaseData; message: ChatMessage }
+  | { type: "response-complete"; data: CaseData }
   | { type: "preference-complete"; preferences: CustomerPreferences; continueToBasket: boolean }
   | { type: "add-message"; message: ChatMessage }
   | { type: "feedback"; feedback: "yes" | "no" };
@@ -193,7 +193,6 @@ function reducer(state: JourneyState, action: Action): JourneyState {
         timeline: action.data.timeline,
         stage: "confirmation",
         history: [...state.history, state.stage],
-        messages: [...state.messages, action.message],
         mutation: null,
         error: null,
       };
@@ -426,11 +425,7 @@ export default function App() {
         selected_sku_id: skuId,
       });
       const data = await loadCaseData(response.notification_id);
-      dispatch({
-        type: "response-complete",
-        data,
-        message: makeMessage("maya", `Option ${state.caseDetails.valid_alternatives.findIndex((item) => item.sku_id === skuId) + 1}`),
-      });
+      dispatch({ type: "response-complete", data });
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -444,11 +439,7 @@ export default function App() {
         resolution_choice: choice,
       });
       const data = await loadCaseData(response.notification_id);
-      dispatch({
-        type: "response-complete",
-        data,
-        message: makeMessage("maya", choice === "WALLET_CREDIT" ? "Instant Yacy wallet credit" : "Refund to card"),
-      });
+      dispatch({ type: "response-complete", data });
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -841,8 +832,9 @@ function PhoneExperience({
   }
 
   const messages = state.messages;
-  const showOptions = state.stage === "chat" && Boolean(state.caseDetails?.valid_alternatives.length);
-  const showResolution = state.stage === "chat" && Boolean(state.caseDetails?.human_assistance);
+  const isChatOrConfirmation = state.stage === "chat" || state.stage === "confirmation";
+  const showOptions = isChatOrConfirmation && Boolean(state.caseDetails?.valid_alternatives.length);
+  const showResolution = isChatOrConfirmation && Boolean(state.caseDetails?.human_assistance);
   const showConfirmation = state.stage === "confirmation";
   const assistance = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
 
@@ -872,7 +864,12 @@ function PhoneExperience({
         {showOptions && (
           <div className="customer-actions">
             {state.caseDetails?.valid_alternatives.map((option, index) => (
-              <button key={option.sku_id} onClick={() => onChooseOption(option.sku_id)} disabled={Boolean(state.mutation) || state.caseDetails?.resolved}>
+              <button
+                key={option.sku_id}
+                className={option.sku_id === state.notification?.responded_sku_id ? "chosen" : ""}
+                onClick={() => onChooseOption(option.sku_id)}
+                disabled={Boolean(state.mutation) || state.caseDetails?.resolved}
+              >
                 {state.mutation === "response" ? "Updating…" : `Option ${index + 1}`}
               </button>
             ))}
@@ -882,12 +879,39 @@ function PhoneExperience({
           <div className="resolution-chat-actions">
             <p>Choose how you’d like us to resolve the missing item.</p>
             {state.caseDetails?.human_assistance?.resolution_options.map((option) => (
-              <button key={option.type} onClick={() => onChooseResolution(option.type)} disabled={Boolean(state.mutation) || state.caseDetails?.resolved}>
+              <button
+                key={option.type}
+                className={option.type === state.notification?.responded_resolution_choice ? "chosen" : ""}
+                onClick={() => onChooseResolution(option.type)}
+                disabled={Boolean(state.mutation) || state.caseDetails?.resolved}
+              >
                 {option.type === "WALLET_CREDIT" ? "Instant Yacy wallet credit" : "Refund to card · 3–5 days"}
                 <strong>{formatPrice(option.amount, option.currency)}</strong>
               </button>
             ))}
           </div>
+        )}
+        {state.caseDetails?.resolved && state.notification?.responded_sku_id && (
+          <ChatBubble
+            speaker="maya"
+            text={`Option ${
+              (state.caseDetails.valid_alternatives.findIndex(
+                (option) => option.sku_id === state.notification?.responded_sku_id,
+              ) ?? -1) + 1
+            }`}
+            time={currentTime()}
+          />
+        )}
+        {state.caseDetails?.resolved && state.notification?.responded_resolution_choice && (
+          <ChatBubble
+            speaker="maya"
+            text={
+              state.notification.responded_resolution_choice === "WALLET_CREDIT"
+                ? "Instant Yacy wallet credit"
+                : "Refund to card"
+            }
+            time={currentTime()}
+          />
         )}
         {showConfirmation && (() => {
           const swappedProductName = state.order?.items.find(
