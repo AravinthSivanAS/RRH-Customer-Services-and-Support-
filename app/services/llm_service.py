@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("yacy.near.llm")
+
+# Keyed by (kind, context, fallback): once a given demo step has produced a
+# message, every later request for that exact step returns the same cached
+# text instead of asking the LLM again. This keeps the wording for a given
+# conversation step stable across repeated run-throughs of the demo (and
+# avoids paying LLM latency twice for the same message).
+_cache: Dict[str, str] = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_key(kind: str, context: Dict[str, Any], fallback: str) -> str:
+    return f"{kind}|{json.dumps(context, sort_keys=True, default=str)}|{fallback}"
 
 _SYSTEM_PROMPT = (
     "You write short customer-facing WhatsApp messages for Yacy, an online grocery retailer. "
@@ -59,6 +73,12 @@ def generate_message(
 
     Returns (message_text, source) where source is "llm" or "fallback".
     """
+    key = _cache_key(kind, context, fallback)
+    with _cache_lock:
+        cached = _cache.get(key)
+    if cached is not None:
+        return cached, "llm-cached"
+
     client = _get_client()
     if client is None:
         return fallback, "fallback"
@@ -85,6 +105,8 @@ def generate_message(
         )
         text = (response.choices[0].message.content or "").strip()
         if text:
+            with _cache_lock:
+                _cache[key] = text
             return text, "llm"
         return fallback, "fallback"
     except Exception:

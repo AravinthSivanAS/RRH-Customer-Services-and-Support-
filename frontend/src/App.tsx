@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { Fragment, useCallback, useEffect, useReducer, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import {
   api,
   ApiError,
@@ -44,6 +45,11 @@ interface DashboardData {
 interface ChatMessage {
   id: number;
   speaker: Speaker;
+  text: string;
+  time: string;
+}
+
+interface ComposerExchange {
   text: string;
   time: string;
 }
@@ -321,9 +327,13 @@ function useGeneratedMessage(
     api
       .generateMessage({ kind, context, fallback })
       .then((result) => {
+        // eslint-disable-next-line no-console
+        console.info(`[yacy-llm] ${kind} -> source=${result.source}`, result.message);
         if (!cancelled) setResolved({ key, text: result.message });
       })
-      .catch(() => {
+      .catch((error) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[yacy-llm] ${kind} -> request failed, using fallback`, error);
         if (!cancelled) setResolved({ key, text: fallback });
       });
     return () => {
@@ -339,6 +349,9 @@ function useGeneratedMessage(
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [reply, setReply] = useState("");
+  const [orderExchanges, setOrderExchanges] = useState<ComposerExchange[]>([]);
+  const [chatExchanges, setChatExchanges] = useState<ComposerExchange[]>([]);
+  const [feedbackExchanges, setFeedbackExchanges] = useState<ComposerExchange[]>([]);
   const resolved = state.caseDetails?.resolved === true;
   const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
@@ -363,6 +376,9 @@ export default function App() {
       if (scenario === "none") await api.prepareNoMeadowScenario();
       dispatch({ type: "scenario-ready", scenario, data: await loadDashboard() });
       setReply("");
+      setOrderExchanges([]);
+      setChatExchanges([]);
+      setFeedbackExchanges([]);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -376,6 +392,9 @@ export default function App() {
       if (state.scenario === "none") await api.prepareNoMeadowScenario();
       dispatch({ type: "scenario-ready", scenario: state.scenario, data: await loadDashboard() });
       setReply("");
+      setOrderExchanges([]);
+      setChatExchanges([]);
+      setFeedbackExchanges([]);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -582,9 +601,25 @@ export default function App() {
                   onChooseResolution={(choice) => void chooseResolution(choice)}
                   onNavigate={navigate}
                   onSavePreference={() => void savePreference()}
+                  orderExchanges={orderExchanges}
+                  setOrderExchanges={setOrderExchanges}
+                  chatExchanges={chatExchanges}
+                  setChatExchanges={setChatExchanges}
+                  feedbackExchanges={feedbackExchanges}
+                  setFeedbackExchanges={setFeedbackExchanges}
                 />
               )}
             </div>
+            {state.stage === "order-confirmation" && orderExchanges.length > 0 && (
+              <button className="continue-outside-phone" aria-label="Continue" onClick={() => navigate("lock")}>
+                →
+              </button>
+            )}
+            {state.stage === "confirmation" && chatExchanges.length > 0 && (
+              <button className="continue-outside-phone" aria-label="Continue" onClick={() => navigate("delivery-notification")}>
+                →
+              </button>
+            )}
           </div>
         </section>
 
@@ -616,6 +651,12 @@ function PhoneExperience({
   onChooseResolution,
   onNavigate,
   onSavePreference,
+  orderExchanges,
+  setOrderExchanges,
+  chatExchanges,
+  setChatExchanges,
+  feedbackExchanges,
+  setFeedbackExchanges,
 }: {
   state: JourneyState;
   originalPrice: number;
@@ -624,23 +665,13 @@ function PhoneExperience({
   onChooseResolution: (choice: string) => void;
   onNavigate: (stage: Stage) => void;
   onSavePreference: () => void;
+  orderExchanges: ComposerExchange[];
+  setOrderExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
+  chatExchanges: ComposerExchange[];
+  setChatExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
+  feedbackExchanges: ComposerExchange[];
+  setFeedbackExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
 }) {
-  const [orderThankYouSent, setOrderThankYouSent] = useState(false);
-  const [chatThankYouSent, setChatThankYouSent] = useState(false);
-  const [feedbackText, setFeedbackText] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!orderThankYouSent || state.stage !== "order-confirmation") return;
-    const timer = setTimeout(() => onNavigate("lock"), 900);
-    return () => clearTimeout(timer);
-  }, [orderThankYouSent, state.stage, onNavigate]);
-
-  useEffect(() => {
-    if (!chatThankYouSent || state.stage !== "confirmation") return;
-    const timer = setTimeout(() => onNavigate("delivery-notification"), 900);
-    return () => clearTimeout(timer);
-  }, [chatThankYouSent, state.stage, onNavigate]);
-
   useEffect(() => {
     if (state.stage !== "tracking") return;
     const timer = setTimeout(() => onNavigate("delivered-notification"), 3000);
@@ -675,34 +706,6 @@ function PhoneExperience({
             Checkout · {formatPrice(orderTotal(state.order), state.order.currency)}
           </button>
         </div>
-      </div>
-    );
-  }
-
-  if (state.stage === "order-confirmation" && state.order) {
-    return (
-      <div className="phone-app order-confirmation-app">
-        <div className="phone-appbar"><Logo compact /><strong>WhatsApp · 19:31</strong></div>
-        <div className="order-confirmation-chat">
-          <span className="day-stamp">TODAY</span>
-          <GeneratedChatBubble
-            speaker="yacy"
-            kind="ORDER_CONFIRMATION"
-            context={{
-              customer_name: state.customer?.customer_name,
-              order_id: state.order.order_id,
-              delivery_date: formatDeliveryDate(state.order.delivery_date),
-              delivery_slot: formatSlot(state.order.delivery_slot),
-            }}
-            fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
-            time="19:31"
-          />
-          {orderThankYouSent && <ChatBubble speaker="maya" text="Thank you!" time="19:31" />}
-        </div>
-        <PhoneComposer
-          disabled={orderThankYouSent}
-          onSend={() => setOrderThankYouSent(true)}
-        />
       </div>
     );
   }
@@ -816,11 +819,14 @@ function PhoneExperience({
     );
   }
 
+  const order = state.order;
   const messages = state.messages;
-  const isChatOrConfirmation = state.stage === "chat" || state.stage === "confirmation";
+  const isChatOrConfirmation =
+    state.stage === "chat" || state.stage === "confirmation" || state.stage === "delivered";
   const showOptions = isChatOrConfirmation && Boolean(state.caseDetails?.valid_alternatives.length);
   const showResolution = isChatOrConfirmation && Boolean(state.caseDetails?.human_assistance);
   const showConfirmation = state.stage === "confirmation";
+  const confirmationUpdatesVisible = state.stage === "confirmation" || state.stage === "delivered";
   const assistance = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
 
   return (
@@ -828,6 +834,41 @@ function PhoneExperience({
       <PhoneChatHeader onNavigate={onNavigate} onBack={onBack} />
       <div className="chat-history" aria-live="polite">
         <div className="day-stamp">TODAY</div>
+        {order && (
+          <>
+            <GeneratedChatBubble
+              speaker="yacy"
+              kind="ORDER_CONFIRMATION"
+              context={{
+                customer_name: state.customer?.customer_name,
+                order_id: order.order_id,
+                delivery_date: formatDeliveryDate(order.delivery_date),
+                delivery_slot: formatSlot(order.delivery_slot),
+              }}
+              fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${order.order_id} is confirmed for ${formatDeliveryDate(order.delivery_date)}, ${formatSlot(order.delivery_slot)}. We’ll message you here if anything changes.`}
+              time="19:31"
+            />
+            {orderExchanges.map((exchange, index) => (
+              <Fragment key={`order-${index}-${exchange.time}`}>
+                <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+                <GeneratedChatBubble
+                  speaker="yacy"
+                  kind="ORDER_CONFIRMATION_FOLLOWUP"
+                  context={{
+                    customer_message: exchange.text,
+                    customer_name: state.customer?.customer_name,
+                    order_id: order.order_id,
+                    delivery_date: formatDeliveryDate(order.delivery_date),
+                    delivery_slot: formatSlot(order.delivery_slot),
+                    items: order.items.map((item) => item.product_name),
+                  }}
+                  fallback="Thanks for your message! Let us know if there's anything else about your order."
+                  time={exchange.time}
+                />
+              </Fragment>
+            ))}
+          </>
+        )}
         {messages.map((message) => (
           message.speaker === "system"
             ? <span className="chat-system" key={message.id}>{message.text}</span>
@@ -898,7 +939,7 @@ function PhoneExperience({
             time={currentTime()}
           />
         )}
-        {showConfirmation && (() => {
+        {confirmationUpdatesVisible && (() => {
           const swappedProductName = state.order?.items.find(
             (item) => item.sku_id === state.notification?.responded_sku_id,
           )?.product_name ?? "Your Meadow replacement";
@@ -944,7 +985,23 @@ function PhoneExperience({
 
           return <SequentialChatBubbles items={items} />;
         })()}
-        {showConfirmation && chatThankYouSent && <ChatBubble speaker="maya" text="Thank you!" time={currentTime()} />}
+        {confirmationUpdatesVisible && chatExchanges.map((exchange, index) => (
+          <Fragment key={`${index}-${exchange.time}`}>
+            <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+            <GeneratedChatBubble
+              speaker="yacy"
+              kind="SUBSTITUTION_FOLLOWUP"
+              context={{
+                customer_message: exchange.text,
+                order_id: state.order?.order_id,
+                responded_sku_id: state.notification?.responded_sku_id,
+                responded_resolution_choice: state.notification?.responded_resolution_choice,
+              }}
+              fallback="Thanks for your message! Let us know if there's anything else we can help with."
+              time={exchange.time}
+            />
+          </Fragment>
+        ))}
         {state.stage === "delivered" && (
           <>
             <SequentialChatBubbles
@@ -965,16 +1022,18 @@ function PhoneExperience({
                 },
               ]}
             />
-            {feedbackText && <ChatBubble speaker="maya" text={feedbackText} time={currentTime()} />}
-            {feedbackText && (
-              <GeneratedChatBubble
-                speaker="yacy"
-                kind="FEEDBACK_THANKS"
-                context={{ customer_feedback: feedbackText }}
-                fallback="Thanks for your feedback — we’ll remember that for next time!"
-                time={currentTime()}
-              />
-            )}
+            {feedbackExchanges.map((exchange, index) => (
+              <Fragment key={`feedback-${index}-${exchange.time}`}>
+                <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+                <GeneratedChatBubble
+                  speaker="yacy"
+                  kind="FEEDBACK_THANKS"
+                  context={{ customer_feedback: exchange.text }}
+                  fallback="Thanks for your feedback — we’ll remember that for next time!"
+                  time={exchange.time}
+                />
+              </Fragment>
+            ))}
           </>
         )}
       </div>
@@ -983,13 +1042,14 @@ function PhoneExperience({
           onSettings={() => onNavigate("preferences")}
           onAssistant={() => onNavigate("assistant")}
           onSend={
-            showConfirmation
-              ? () => setChatThankYouSent(true)
-              : state.stage === "delivered" && !feedbackText
-                ? (text) => setFeedbackText(text)
-                : undefined
+            state.stage === "order-confirmation"
+              ? (text) => setOrderExchanges((prev) => [...prev, { text, time: currentTime() }])
+              : showConfirmation
+                ? (text) => setChatExchanges((prev) => [...prev, { text, time: currentTime() }])
+                : state.stage === "delivered"
+                  ? (text) => setFeedbackExchanges((prev) => [...prev, { text, time: currentTime() }])
+                  : undefined
           }
-          disabled={chatThankYouSent || Boolean(feedbackText)}
         />
       </div>
     </div>
