@@ -24,10 +24,74 @@ _SYSTEM_PROMPT = (
     "You write short customer-facing WhatsApp messages for Yacy, an online grocery retailer. "
     "Tone: warm, concise, professional British English. Hard rules: "
     "1) Use only the facts given in the context - never invent prices, dates, names, brands, or products. "
-    "2) Keep it to 1-3 sentences, no more than ~280 characters. "
-    "3) No emoji unless the fallback example uses one. "
-    "4) Reply with the message text only - no quotes, no preamble, no explanation."
+    "2) When `conversation_history` is present in the context, read it first - it is everything said so far "
+    "in this chat. Answer like a human who remembers the conversation: do not repeat an answer you already "
+    "gave, do not ask a question that was already answered, and refer back to earlier turns where it helps. "
+    "3) If the customer asks something context does not cover, say you don't have that detail - never "
+    "deflect with a generic 'check your account/order history' line when the context actually contains the "
+    "answer. "
+    "4) Keep it to 1-3 sentences, no more than ~280 characters. "
+    "5) No emoji unless the fallback example uses one. "
+    "6) Reply with the message text only - no quotes, no preamble, no explanation."
 )
+
+# Per-kind nudges layered on top of the system prompt above. These steer *how*
+# the model should reason about a given message kind without ever dictating
+# the actual wording - the reply itself always comes from the LLM.
+_KIND_GUIDANCE: Dict[str, str] = {
+    # Which stage of the feedback conversation to move to next (sentiment, which
+    # area the customer means, when to stop asking) is decided deterministically
+    # in the frontend, not inferred by the LLM from raw history - that branching
+    # needs to be reliable every time. Each kind below is a single, narrow
+    # instruction for turning an already-decided step into natural wording.
+    "FEEDBACK_ASK_AREA": (
+        "The customer's feedback was negative. Acknowledge that briefly, then ask ONE question: did the "
+        "issue concern the products, the delivery, or both? Do not name a specific product. Never use: "
+        "sorry, apolog, on board, improve, remember."
+    ),
+    "FEEDBACK_ASK_WHICH_FIRST": (
+        "The customer said both the products and the delivery had problems. Ask ONE short question: would "
+        "they like to detail the products or the delivery first? Do not name a specific product."
+    ),
+    "FEEDBACK_ASK_AREA_DETAIL": (
+        "`area` in context is either 'products' or 'delivery'. Ask ONE short question for more detail about "
+        "that area specifically - for 'products': which item, or what was wrong with it, without naming a "
+        "specific product yourself unless the customer already named one in `customer_feedback`; for "
+        "'delivery': timing, the driver, or the condition it arrived in. Do not mention the other area at all."
+    ),
+    "FEEDBACK_ASK_NEXT_AREA_DETAIL": (
+        "Acknowledge in a few words what the customer just told you about `acknowledged_area` (their words "
+        "are in `customer_feedback`), then ask ONE short question for detail about `next_area` specifically - "
+        "same rules as FEEDBACK_ASK_AREA_DETAIL (don't name a specific product unless the customer already "
+        "has, and don't mention `acknowledged_area` again beyond the brief acknowledgement)."
+    ),
+    "FEEDBACK_FINAL_ACK": (
+        "The customer has now given detail on every area that was a problem - `details` in context is an "
+        "object keyed by area ('products' and/or 'delivery') with what they said about each. Write ONE warm, "
+        "considerate closing message that specifically references what they told you for EACH area present "
+        "in `details` (not a generic line), reassuring them it will be looked into for next time. No question "
+        "mark. Never use: sorry, apolog, on board, remember, or the literal word 'improve'."
+    ),
+    "FEEDBACK_THANKS_POSITIVE": (
+        "The customer's feedback was positive. Write a short, warm thank-you - if `customer_feedback` "
+        "mentions something specific, thank them for that; otherwise thank them for the order/delivery as a "
+        "whole. No question mark."
+    ),
+    "FEEDBACK_THANKS": (
+        "This is a casual follow-up after the feedback conversation already wrapped up. Respond naturally "
+        "and warmly to whatever the customer just said in `customer_feedback`, using the order facts in "
+        "context if relevant. Keep it brief."
+    ),
+    "SUBSTITUTION_FOLLOWUP": (
+        "Answer the customer's question directly using the order items, substitution, and delivery facts "
+        "given in context - e.g. if they ask for a list of products or what was delivered, name the actual "
+        "items from context instead of a generic acknowledgement."
+    ),
+    "ORDER_CONFIRMATION_FOLLOWUP": (
+        "Answer the customer's question directly using the order items and delivery facts given in "
+        "context - e.g. if they ask to list the products, list them by name."
+    ),
+}
 
 _client: Optional[object] = None
 _client_checked = False
@@ -85,11 +149,13 @@ def generate_message(
 
     default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
     model = os.environ.get("OPENAI_MODEL", default_model)
+    guidance = _KIND_GUIDANCE.get(kind)
     user_prompt = (
         f"Message kind: {kind}\n"
         f"Context facts (JSON): {context}\n"
-        f"Reference tone/length example (do not copy verbatim, write a fresh message "
-        f"using only the context facts above): {fallback}"
+        f"Reference example, for length/format only - its tone may be wrong for this specific case, "
+        f"follow the instructions above it instead: {fallback}"
+        + (f"\nInstructions for this kind (these override the reference example's tone above): {guidance}" if guidance else "")
     )
 
     try:
@@ -99,7 +165,7 @@ def generate_message(
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=120,
+            max_tokens=160,
             temperature=0.6,
             timeout=8,
         )

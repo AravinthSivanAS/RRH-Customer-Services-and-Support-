@@ -52,7 +52,36 @@ interface ChatMessage {
 interface ComposerExchange {
   text: string;
   time: string;
+  reply?: string;
+  /** Conversation so far, frozen at the moment this message was sent - never
+   * recomputed later, so an earlier bubble's LLM request never changes shape
+   * just because a newer message arrived elsewhere in the chat. */
+  history: Array<{ speaker: "maya" | "yacy"; text: string }>;
+  /** Which generated-message kind/context/fallback this exchange's reply should
+   * use - decided deterministically in code (see planFeedbackReply) instead of
+   * left for the LLM to infer from raw history, so the conversation's branching
+   * logic is reliable; only the actual wording stays LLM-generated. Only used
+   * for feedbackExchanges - orderExchanges/chatExchanges use a fixed kind. */
+  replyKind?: string;
+  replyContext?: Record<string, unknown>;
+  replyFallback?: string;
 }
+
+type FeedbackArea = "products" | "delivery";
+
+interface FeedbackFlowState {
+  stage: "awaiting-initial" | "awaiting-area" | "awaiting-which-first" | "awaiting-detail" | "done";
+  pendingAreas: FeedbackArea[];
+  currentArea: FeedbackArea | null;
+  details: Partial<Record<FeedbackArea, string>>;
+}
+
+const initialFeedbackFlow: FeedbackFlowState = {
+  stage: "awaiting-initial",
+  pendingAreas: [],
+  currentArea: null,
+  details: {},
+};
 
 interface JourneyState extends Partial<DashboardData> {
   scenario: Scenario;
@@ -301,6 +330,177 @@ function orderTotal(order: OrderSnapshot) {
   return order.order_total ?? order.items.reduce((total, item) => total + item.quantity * item.unit_price, 0);
 }
 
+/**
+ * Facts the LLM is allowed to state as true - passed as `context` on every
+ * conversational follow-up so answers like "list the items" or "what was
+ * delivered" reflect the real order instead of a generic deflection.
+ */
+function buildOrderFacts(state: JourneyState): Record<string, unknown> {
+  const order = state.order;
+  if (!order) return {};
+
+  const originalItem = order.items.find((item) => item.sku_id === ORIGINAL_SKU);
+  const replacementItem = state.notification?.responded_sku_id
+    ? order.items.find((item) => item.sku_id === state.notification?.responded_sku_id)
+    : undefined;
+
+  return {
+    order_id: order.order_id,
+    delivery_date: formatDeliveryDate(order.delivery_date),
+    delivery_slot: formatSlot(order.delivery_slot),
+    delivery_status:
+      state.stage === "delivered"
+        ? "delivered"
+        : state.stage === "tracking" || state.stage === "delivery-notification" || state.stage === "delivered-notification"
+          ? "out_for_delivery"
+          : "confirmed_not_yet_delivered",
+    items: order.items.map((item) => ({ product_name: item.product_name, quantity: item.quantity, status: item.item_status })),
+    original_item_out_of_stock: originalItem?.product_name,
+    substitution_chosen: replacementItem?.product_name,
+    resolution_choice: state.notification?.responded_resolution_choice ?? undefined,
+  };
+}
+
+/**
+ * The full back-and-forth so far (this run only, cleared on restart), so a
+ * follow-up answer can refer back to something the customer asked earlier
+ * instead of treating every message as a stateless one-off.
+ */
+function buildConversationHistory(
+  ...exchangeLists: ComposerExchange[][]
+): Array<{ speaker: "maya" | "yacy"; text: string }> {
+  const turns: Array<{ speaker: "maya" | "yacy"; text: string }> = [];
+  for (const exchanges of exchangeLists) {
+    for (const exchange of exchanges) {
+      turns.push({ speaker: "maya", text: exchange.text });
+      if (exchange.reply) turns.push({ speaker: "yacy", text: exchange.reply });
+    }
+  }
+  return turns;
+}
+
+function recordExchangeReply(setExchanges: Dispatch<SetStateAction<ComposerExchange[]>>, index: number, reply: string) {
+  setExchanges((prev) => prev.map((exchange, i) => (i === index ? { ...exchange, reply } : exchange)));
+}
+
+/**
+ * Deciding whether a reply is positive or negative, and which area (products
+ * vs delivery) a message is about, is done here in plain code rather than
+ * left to the LLM - that branching needs to be reliable every time, whereas
+ * asking an LLM to infer conversation state from raw history turned out not
+ * to be. The LLM is still the one writing every word the customer sees.
+ */
+function classifyFeedbackSentiment(text: string): "positive" | "negative" {
+  const normalized = text.trim().toLowerCase();
+  if (/^(no|nah|nope|not really|not at all)\b/.test(normalized)) return "negative";
+  if (/^(yes|yeah|yep|yup|sure)\b/.test(normalized)) return "positive";
+  const negativeMarkers = [
+    "bad", "poor", "terrible", "awful", "wrong", "issue", "problem", "late", "missing",
+    "damaged", "disappoint", "worse", "unhappy", "cold", "broken", "n't",
+  ];
+  const positiveMarkers = ["good", "great", "perfect", "happy", "fine", "excellent", "amazing", "love", "satisfied", "nice"];
+  const hasNegative = negativeMarkers.some((word) => normalized.includes(word));
+  const hasPositive = positiveMarkers.some((word) => normalized.includes(word));
+  if (hasPositive && !hasNegative) return "positive";
+  return hasNegative || !hasPositive ? "negative" : "positive";
+}
+
+function classifyFeedbackArea(text: string, itemNames: string[]): FeedbackArea | "both" | null {
+  const normalized = text.trim().toLowerCase();
+  const mentionsDelivery = /deliver|driver|late|timing|time slot|courier|arriv/.test(normalized);
+  const mentionsProducts =
+    /\bproduct|\bitem|\bbasket/.test(normalized) ||
+    itemNames.some((name) => name && normalized.includes(name.toLowerCase().split(" ")[0]));
+  if (/\bboth\b/.test(normalized) || (mentionsProducts && mentionsDelivery)) return "both";
+  if (mentionsProducts) return "products";
+  if (mentionsDelivery) return "delivery";
+  return null;
+}
+
+interface FeedbackReplyPlan {
+  kind: string;
+  context: Record<string, unknown>;
+  fallback: string;
+  nextFlow: FeedbackFlowState;
+}
+
+function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Record<string, unknown>, itemNames: string[]): FeedbackReplyPlan {
+  switch (flow.stage) {
+    case "awaiting-initial": {
+      if (classifyFeedbackSentiment(text) === "positive") {
+        return {
+          kind: "FEEDBACK_THANKS_POSITIVE",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Thank you for your feedback, Maya - glad everything was just as you wanted!",
+          nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      return {
+        kind: "FEEDBACK_ASK_AREA",
+        context: { customer_feedback: text, ...orderFacts },
+        fallback: "Did the issue concern the products, the delivery, or both?",
+        nextFlow: { ...flow, stage: "awaiting-area" },
+      };
+    }
+    case "awaiting-area": {
+      const area = classifyFeedbackArea(text, itemNames);
+      if (area === "both") {
+        return {
+          kind: "FEEDBACK_ASK_WHICH_FIRST",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Would you like to detail the products or the delivery first?",
+          nextFlow: { ...flow, stage: "awaiting-which-first", pendingAreas: ["products", "delivery"] },
+        };
+      }
+      const singleArea: FeedbackArea = area ?? "products";
+      return {
+        kind: "FEEDBACK_ASK_AREA_DETAIL",
+        context: { customer_feedback: text, area: singleArea, ...orderFacts },
+        fallback: `Could you share more about what went wrong with the ${singleArea}?`,
+        nextFlow: { ...flow, stage: "awaiting-detail", currentArea: singleArea, pendingAreas: [] },
+      };
+    }
+    case "awaiting-which-first": {
+      const picked = classifyFeedbackArea(text, itemNames);
+      const area: FeedbackArea = picked === "products" || picked === "delivery" ? picked : flow.pendingAreas[0];
+      const remaining = flow.pendingAreas.filter((candidate) => candidate !== area);
+      return {
+        kind: "FEEDBACK_ASK_AREA_DETAIL",
+        context: { customer_feedback: text, area, ...orderFacts },
+        fallback: `Could you share more about what went wrong with the ${area}?`,
+        nextFlow: { ...flow, stage: "awaiting-detail", currentArea: area, pendingAreas: remaining },
+      };
+    }
+    case "awaiting-detail": {
+      const area: FeedbackArea = flow.currentArea ?? "products";
+      const details = { ...flow.details, [area]: text };
+      if (flow.pendingAreas.length > 0) {
+        const nextArea = flow.pendingAreas[0];
+        return {
+          kind: "FEEDBACK_ASK_NEXT_AREA_DETAIL",
+          context: { customer_feedback: text, acknowledged_area: area, next_area: nextArea, ...orderFacts },
+          fallback: `Thanks for sharing that about the ${area}. And what about the ${nextArea} - what went wrong there?`,
+          nextFlow: { ...flow, stage: "awaiting-detail", currentArea: nextArea, pendingAreas: flow.pendingAreas.slice(1), details },
+        };
+      }
+      return {
+        kind: "FEEDBACK_FINAL_ACK",
+        context: { customer_feedback: text, area, details, ...orderFacts },
+        fallback: "Thank you for the detailed feedback, Maya - we'll make sure this is addressed for your next order.",
+        nextFlow: { ...flow, stage: "done", details },
+      };
+    }
+    case "done":
+    default:
+      return {
+        kind: "FEEDBACK_THANKS",
+        context: { customer_feedback: text, ...orderFacts },
+        fallback: "Thanks for your message! Let us know if there's anything else we can help with.",
+        nextFlow: flow,
+      };
+  }
+}
+
 function makeMessage(speaker: Speaker, text: string): ChatMessage {
   return { id: Date.now() + Math.random(), speaker, text, time: currentTime() };
 }
@@ -342,8 +542,14 @@ function useGeneratedMessage(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, skip]);
 
-  const matched = resolved?.key === key;
-  return { text: matched ? resolved.text : fallback, isPending: !matched && !skip };
+  // Once this bubble has ever resolved, keep showing that text even if its
+  // input later shifts under it (e.g. a newer message changed shared
+  // context) - never blank back out to the fallback/typing state, and let
+  // any newer result replace it quietly once it arrives.
+  return {
+    text: resolved ? resolved.text : fallback,
+    isPending: resolved === null && !skip,
+  };
 }
 
 export default function App() {
@@ -352,6 +558,7 @@ export default function App() {
   const [orderExchanges, setOrderExchanges] = useState<ComposerExchange[]>([]);
   const [chatExchanges, setChatExchanges] = useState<ComposerExchange[]>([]);
   const [feedbackExchanges, setFeedbackExchanges] = useState<ComposerExchange[]>([]);
+  const [feedbackFlow, setFeedbackFlow] = useState<FeedbackFlowState>(initialFeedbackFlow);
   const resolved = state.caseDetails?.resolved === true;
   const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
@@ -379,6 +586,7 @@ export default function App() {
       setOrderExchanges([]);
       setChatExchanges([]);
       setFeedbackExchanges([]);
+      setFeedbackFlow(initialFeedbackFlow);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -395,6 +603,7 @@ export default function App() {
       setOrderExchanges([]);
       setChatExchanges([]);
       setFeedbackExchanges([]);
+      setFeedbackFlow(initialFeedbackFlow);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
     }
@@ -607,6 +816,8 @@ export default function App() {
                   setChatExchanges={setChatExchanges}
                   feedbackExchanges={feedbackExchanges}
                   setFeedbackExchanges={setFeedbackExchanges}
+                  feedbackFlow={feedbackFlow}
+                  setFeedbackFlow={setFeedbackFlow}
                 />
               )}
             </div>
@@ -657,6 +868,8 @@ function PhoneExperience({
   setChatExchanges,
   feedbackExchanges,
   setFeedbackExchanges,
+  feedbackFlow,
+  setFeedbackFlow,
 }: {
   state: JourneyState;
   originalPrice: number;
@@ -671,6 +884,8 @@ function PhoneExperience({
   setChatExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
   feedbackExchanges: ComposerExchange[];
   setFeedbackExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
+  feedbackFlow: FeedbackFlowState;
+  setFeedbackFlow: Dispatch<SetStateAction<FeedbackFlowState>>;
 }) {
   useEffect(() => {
     if (state.stage !== "tracking") return;
@@ -851,20 +1066,23 @@ function PhoneExperience({
             {orderExchanges.map((exchange, index) => (
               <Fragment key={`order-${index}-${exchange.time}`}>
                 <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
-                <GeneratedChatBubble
-                  speaker="yacy"
-                  kind="ORDER_CONFIRMATION_FOLLOWUP"
-                  context={{
-                    customer_message: exchange.text,
-                    customer_name: state.customer?.customer_name,
-                    order_id: order.order_id,
-                    delivery_date: formatDeliveryDate(order.delivery_date),
-                    delivery_slot: formatSlot(order.delivery_slot),
-                    items: order.items.map((item) => item.product_name),
-                  }}
-                  fallback="Thanks for your message! Let us know if there's anything else about your order."
-                  time={exchange.time}
-                />
+                {exchange.reply ? (
+                  <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
+                ) : (
+                  <GeneratedChatBubble
+                    speaker="yacy"
+                    kind="ORDER_CONFIRMATION_FOLLOWUP"
+                    context={{
+                      customer_message: exchange.text,
+                      customer_name: state.customer?.customer_name,
+                      ...buildOrderFacts(state),
+                      conversation_history: exchange.history,
+                    }}
+                    fallback="Thanks for your message! Let us know if there's anything else about your order."
+                    time={exchange.time}
+                    onResolved={(text) => recordExchangeReply(setOrderExchanges, index, text)}
+                  />
+                )}
               </Fragment>
             ))}
           </>
@@ -988,18 +1206,22 @@ function PhoneExperience({
         {confirmationUpdatesVisible && chatExchanges.map((exchange, index) => (
           <Fragment key={`${index}-${exchange.time}`}>
             <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
-            <GeneratedChatBubble
-              speaker="yacy"
-              kind="SUBSTITUTION_FOLLOWUP"
-              context={{
-                customer_message: exchange.text,
-                order_id: state.order?.order_id,
-                responded_sku_id: state.notification?.responded_sku_id,
-                responded_resolution_choice: state.notification?.responded_resolution_choice,
-              }}
-              fallback="Thanks for your message! Let us know if there's anything else we can help with."
-              time={exchange.time}
-            />
+            {exchange.reply ? (
+              <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
+            ) : (
+              <GeneratedChatBubble
+                speaker="yacy"
+                kind="SUBSTITUTION_FOLLOWUP"
+                context={{
+                  customer_message: exchange.text,
+                  ...buildOrderFacts(state),
+                  conversation_history: exchange.history,
+                }}
+                fallback="Thanks for your message! Let us know if there's anything else we can help with."
+                time={exchange.time}
+                onResolved={(text) => recordExchangeReply(setChatExchanges, index, text)}
+              />
+            )}
           </Fragment>
         ))}
         {state.stage === "delivered" && (
@@ -1025,13 +1247,21 @@ function PhoneExperience({
             {feedbackExchanges.map((exchange, index) => (
               <Fragment key={`feedback-${index}-${exchange.time}`}>
                 <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
-                <GeneratedChatBubble
-                  speaker="yacy"
-                  kind="FEEDBACK_THANKS"
-                  context={{ customer_feedback: exchange.text }}
-                  fallback="Thanks for your feedback — we’ll remember that for next time!"
-                  time={exchange.time}
-                />
+                {exchange.reply ? (
+                  <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
+                ) : (
+                  <GeneratedChatBubble
+                    speaker="yacy"
+                    kind={exchange.replyKind ?? "FEEDBACK_THANKS"}
+                    context={{
+                      ...exchange.replyContext,
+                      conversation_history: exchange.history,
+                    }}
+                    fallback={exchange.replyFallback ?? "Thanks for your feedback — we’ll remember that for next time!"}
+                    time={exchange.time}
+                    onResolved={(text) => recordExchangeReply(setFeedbackExchanges, index, text)}
+                  />
+                )}
               </Fragment>
             ))}
           </>
@@ -1043,11 +1273,38 @@ function PhoneExperience({
           onAssistant={() => onNavigate("assistant")}
           onSend={
             state.stage === "order-confirmation"
-              ? (text) => setOrderExchanges((prev) => [...prev, { text, time: currentTime() }])
+              ? (text) =>
+                  setOrderExchanges((prev) => [
+                    ...prev,
+                    { text, time: currentTime(), history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges) },
+                  ])
               : showConfirmation
-                ? (text) => setChatExchanges((prev) => [...prev, { text, time: currentTime() }])
+                ? (text) =>
+                    setChatExchanges((prev) => [
+                      ...prev,
+                      { text, time: currentTime(), history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges) },
+                    ])
                 : state.stage === "delivered"
-                  ? (text) => setFeedbackExchanges((prev) => [...prev, { text, time: currentTime() }])
+                  ? (text) => {
+                      const plan = planFeedbackReply(
+                        text,
+                        feedbackFlow,
+                        buildOrderFacts(state),
+                        state.order?.items.map((item) => item.product_name) ?? [],
+                      );
+                      setFeedbackFlow(plan.nextFlow);
+                      setFeedbackExchanges((prev) => [
+                        ...prev,
+                        {
+                          text,
+                          time: currentTime(),
+                          history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges),
+                          replyKind: plan.kind,
+                          replyContext: plan.context,
+                          replyFallback: plan.fallback,
+                        },
+                      ]);
+                    }
                   : undefined
           }
         />
@@ -1167,12 +1424,12 @@ function GeneratedChatBubble({
   context: Record<string, unknown>;
   fallback: string;
   time: string;
-  onResolved?: () => void;
+  onResolved?: (text: string) => void;
 }) {
   const { text, isPending } = useGeneratedMessage(kind, context, fallback);
 
   useEffect(() => {
-    if (!isPending) onResolved?.();
+    if (!isPending) onResolved?.(text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPending]);
 
