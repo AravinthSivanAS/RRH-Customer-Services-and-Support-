@@ -148,8 +148,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .basket-checkout .primary-button { width: 100%; }
 .order-confirmation-chat { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 12px; overflow: auto; padding: 14px 11px; background-color: #f1e9df; background-image: radial-gradient(rgb(130 114 94 / 5%) .7px, transparent .7px); background-size: 12px 12px; }
 .order-confirmation-chat .day-stamp { align-self: center; }
-.order-confirmation-action { margin-top: auto; padding-top: 8px; }
-.order-confirmation-action .primary-button { width: 100%; }
 .tracking-body { display: grid; gap: 10px; overflow: auto; padding: 12px; }
 .fictional-map { position: relative; height: 190px; overflow: hidden; border: 1px solid #e1e8e3; border-radius: 12px; background-color: #edf3ef; background-image: linear-gradient(90deg, transparent 46%, white 46%, white 54%, transparent 54%), linear-gradient(0deg, transparent 45%, white 45%, white 54%, transparent 54%); background-size: 76px 48px; }
 .map-road { position: absolute; z-index: 1; height: 11px; border: 4px solid white; border-right: 0; border-left: 0; background: #e3ece6; }
@@ -167,7 +165,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .tracked-item div { display: grid; gap: 3px; }
 .tracked-item strong { font-size: 9px; }
 .tracked-item small { color: var(--muted); font-size: 8px; }
-.delivery-finish { margin-top: 5px; }
 .notification-screen { display: flex; flex: 1; align-items: flex-start; padding: 18px 12px; background: linear-gradient(160deg, #e9f5ec, #f9fbf9); }
 .push-notification--light { align-items: flex-start; }
 .preferences-appbar { border-bottom: 1px solid var(--line); }

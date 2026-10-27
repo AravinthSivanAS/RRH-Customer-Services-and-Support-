@@ -27,10 +27,10 @@ type Stage =
   | "confirmation"
   | "delivery-notification"
   | "tracking"
+  | "delivered-notification"
   | "delivered"
   | "preferences"
-  | "assistant"
-  | "feedback";
+  | "assistant";
 type Mutation = "scenario" | "short-pick" | "response" | "preference" | "restart" | null;
 type Speaker = "maya" | "yacy" | "marcus" | "system";
 
@@ -61,7 +61,6 @@ interface JourneyState extends Partial<DashboardData> {
   error: { message: string; status: number } | null;
   preferenceSaved: boolean;
   onboardingComplete: boolean;
-  feedback: "yes" | "no" | null;
 }
 
 type Action =
@@ -76,8 +75,7 @@ type Action =
   | { type: "case-refreshed"; data: CaseData }
   | { type: "response-complete"; data: CaseData }
   | { type: "preference-complete"; preferences: CustomerPreferences; continueToBasket: boolean }
-  | { type: "add-message"; message: ChatMessage }
-  | { type: "feedback"; feedback: "yes" | "no" };
+  | { type: "add-message"; message: ChatMessage };
 
 interface CaseData {
   caseDetails: SubstitutionCase;
@@ -101,7 +99,6 @@ const initialState: JourneyState = {
   error: null,
   preferenceSaved: false,
   onboardingComplete: false,
-  feedback: null,
 };
 
 function reducer(state: JourneyState, action: Action): JourneyState {
@@ -208,8 +205,6 @@ function reducer(state: JourneyState, action: Action): JourneyState {
       };
     case "add-message":
       return { ...state, messages: [...state.messages, action.message] };
-    case "feedback":
-      return { ...state, feedback: action.feedback, stage: "feedback", history: [...state.history, state.stage] };
   }
 }
 
@@ -344,7 +339,6 @@ function useGeneratedMessage(
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [reply, setReply] = useState("");
-  const [feedback, setFeedback] = useState<"yes" | "no" | null>(null);
   const resolved = state.caseDetails?.resolved === true;
   const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
@@ -368,7 +362,6 @@ export default function App() {
       await api.resetDemo();
       if (scenario === "none") await api.prepareNoMeadowScenario();
       dispatch({ type: "scenario-ready", scenario, data: await loadDashboard() });
-      setFeedback(null);
       setReply("");
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
@@ -382,7 +375,6 @@ export default function App() {
       await api.resetDemo();
       if (state.scenario === "none") await api.prepareNoMeadowScenario();
       dispatch({ type: "scenario-ready", scenario: state.scenario, data: await loadDashboard() });
-      setFeedback(null);
       setReply("");
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
@@ -542,7 +534,7 @@ export default function App() {
           <div className="phone-frame">
             <div className="phone-screen">
               <div className="phone-notch" />
-              <div className="phone-status"><strong>{state.stage === "tracking" ? "17:30" : state.stage === "delivered" || state.stage === "feedback" ? "18:40" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "welcome" ? "19:11" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
+              <div className="phone-status"><strong>{state.stage === "tracking" ? "17:30" : state.stage === "delivered" ? "18:40" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "welcome" ? "19:11" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
 
               {state.stage === "welcome" && (
                 <div className="welcome-screen">
@@ -569,7 +561,19 @@ export default function App() {
                 </div>
               )}
 
-              {state.stage !== "lock" && state.stage !== "welcome" && (
+              {state.stage === "delivered-notification" && (
+                <div className="lock-screen">
+                  <div className="lock-date">Tuesday</div>
+                  <div className="lock-time">18:42</div>
+                  <button className="push-notification" onClick={() => navigate("delivered")}>
+                    <Logo compact />
+                    <span><strong>WhatsApp · Yacy</strong><small>Your order has been delivered. Tap to see details.</small></span>
+                    <time>now</time>
+                  </button>
+                </div>
+              )}
+
+              {state.stage !== "lock" && state.stage !== "welcome" && state.stage !== "delivered-notification" && (
                 <PhoneExperience
                   state={state}
                   originalPrice={originalItem?.unit_price ?? 3.49}
@@ -578,11 +582,6 @@ export default function App() {
                   onChooseResolution={(choice) => void chooseResolution(choice)}
                   onNavigate={navigate}
                   onSavePreference={() => void savePreference()}
-                  onFeedback={(answer) => {
-                    setFeedback(answer);
-                    dispatch({ type: "feedback", feedback: answer });
-                  }}
-                  feedbackSelection={feedback}
                 />
               )}
             </div>
@@ -617,8 +616,6 @@ function PhoneExperience({
   onChooseResolution,
   onNavigate,
   onSavePreference,
-  onFeedback,
-  feedbackSelection,
 }: {
   state: JourneyState;
   originalPrice: number;
@@ -627,9 +624,29 @@ function PhoneExperience({
   onChooseResolution: (choice: string) => void;
   onNavigate: (stage: Stage) => void;
   onSavePreference: () => void;
-  onFeedback: (answer: "yes" | "no") => void;
-  feedbackSelection: "yes" | "no" | null;
 }) {
+  const [orderThankYouSent, setOrderThankYouSent] = useState(false);
+  const [chatThankYouSent, setChatThankYouSent] = useState(false);
+  const [feedbackText, setFeedbackText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!orderThankYouSent || state.stage !== "order-confirmation") return;
+    const timer = setTimeout(() => onNavigate("lock"), 900);
+    return () => clearTimeout(timer);
+  }, [orderThankYouSent, state.stage, onNavigate]);
+
+  useEffect(() => {
+    if (!chatThankYouSent || state.stage !== "confirmation") return;
+    const timer = setTimeout(() => onNavigate("delivery-notification"), 900);
+    return () => clearTimeout(timer);
+  }, [chatThankYouSent, state.stage, onNavigate]);
+
+  useEffect(() => {
+    if (state.stage !== "tracking") return;
+    const timer = setTimeout(() => onNavigate("delivered-notification"), 3000);
+    return () => clearTimeout(timer);
+  }, [state.stage, onNavigate]);
+
   if (state.stage === "basket" && state.order) {
     const order = state.order;
     return (
@@ -680,11 +697,12 @@ function PhoneExperience({
             fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
             time="19:31"
           />
-          <div className="order-confirmation-action">
-            <button className="button primary-button" onClick={() => onNavigate("lock")}>Continue to order updates</button>
-          </div>
+          {orderThankYouSent && <ChatBubble speaker="maya" text="Thank you!" time="19:31" />}
         </div>
-        <PhoneComposer />
+        <PhoneComposer
+          disabled={orderThankYouSent}
+          onSend={() => setOrderThankYouSent(true)}
+        />
       </div>
     );
   }
@@ -737,7 +755,6 @@ function PhoneExperience({
             {state.order?.items.filter((item) => item.item_status === "APPROVED_SUBSTITUTION").map((item) => (
               <div className="tracked-item" key={item.sku_id}><span>🥛</span><div><strong>{item.product_name}</strong><small>Approved substitution</small></div></div>
             ))}
-            <button className="button primary-button delivery-finish" onClick={() => onNavigate("delivered")}>Mark delivered</button>
           </div>
         )}
       </div>
@@ -795,38 +812,6 @@ function PhoneExperience({
           <span className="saved-chip">✓ Preferences updated</span>
         </div>
         <div className="composer"><input aria-label="Ask about your orders" placeholder="Ask anything about your orders…" /><button aria-label="Send">↑</button></div>
-      </div>
-    );
-  }
-
-  if (state.stage === "feedback") {
-    return (
-      <div className="phone-app chat-app">
-        <PhoneChatHeader onNavigate={onNavigate} onBack={onBack} />
-        <div className="chat-history">
-          <GeneratedChatBubble
-            speaker="yacy"
-            kind="DELIVERED_FEEDBACK_PROMPT"
-            context={{}}
-            fallback="Your order has been delivered. Was today’s swap right for you?"
-            time="18:51"
-          />
-          <div className="customer-actions">
-            <button className={feedbackSelection === "yes" ? "chosen" : ""} onClick={() => onFeedback("yes")} disabled={Boolean(feedbackSelection)}>👍 Yes</button>
-            <button className={feedbackSelection === "no" ? "chosen" : ""} onClick={() => onFeedback("no")} disabled={Boolean(feedbackSelection)}>👎 No</button>
-          </div>
-          {feedbackSelection && <ChatBubble speaker="maya" text={feedbackSelection === "yes" ? "👍 Yes" : "👎 No"} time="18:52" />}
-          {feedbackSelection && (
-            <GeneratedChatBubble
-              speaker="yacy"
-              kind="FEEDBACK_THANKS"
-              context={{ feedback: feedbackSelection }}
-              fallback="Thank you! We’ll remember that."
-              time="18:52"
-            />
-          )}
-        </div>
-        <PhoneComposer />
       </div>
     );
   }
@@ -959,23 +944,53 @@ function PhoneExperience({
 
           return <SequentialChatBubbles items={items} />;
         })()}
+        {showConfirmation && chatThankYouSent && <ChatBubble speaker="maya" text="Thank you!" time={currentTime()} />}
         {state.stage === "delivered" && (
           <>
-            <GeneratedChatBubble
-              speaker="yacy"
-              kind="DELIVERED_WITH_SWAP"
-              context={{}}
-              fallback="Delivered — including your approved Meadow swap."
-              time="18:40"
+            <SequentialChatBubbles
+              items={[
+                {
+                  speaker: "yacy",
+                  kind: "DELIVERED_WITH_SWAP",
+                  context: {},
+                  fallback: "Delivered — including your approved Meadow swap.",
+                  time: "18:40",
+                },
+                {
+                  speaker: "yacy",
+                  kind: "DELIVERED_FEEDBACK_PROMPT",
+                  context: {},
+                  fallback: "Was today’s swap right for you?",
+                  time: "18:40",
+                },
+              ]}
             />
-            <div className="customer-actions"><button onClick={() => onNavigate("feedback")}>👍 Yes</button><button onClick={() => onNavigate("feedback")}>👎 No</button></div>
+            {feedbackText && <ChatBubble speaker="maya" text={feedbackText} time={currentTime()} />}
+            {feedbackText && (
+              <GeneratedChatBubble
+                speaker="yacy"
+                kind="FEEDBACK_THANKS"
+                context={{ customer_feedback: feedbackText }}
+                fallback="Thanks for your feedback — we’ll remember that for next time!"
+                time={currentTime()}
+              />
+            )}
           </>
         )}
       </div>
       <div className="chat-bottom">
-        {showConfirmation && <button className="button primary-button" onClick={() => onNavigate("delivery-notification")}>View delivery update</button>}
-        {state.stage === "delivered" && <button className="button primary-button" onClick={() => onNavigate("feedback")}>Give feedback</button>}
-        <PhoneComposer onSettings={() => onNavigate("preferences")} onAssistant={() => onNavigate("assistant")} />
+        <PhoneComposer
+          onSettings={() => onNavigate("preferences")}
+          onAssistant={() => onNavigate("assistant")}
+          onSend={
+            showConfirmation
+              ? () => setChatThankYouSent(true)
+              : state.stage === "delivered" && !feedbackText
+                ? (text) => setFeedbackText(text)
+                : undefined
+          }
+          disabled={chatThankYouSent || Boolean(feedbackText)}
+        />
       </div>
     </div>
   );
@@ -1000,15 +1015,44 @@ function PhoneChatHeader({
 function PhoneComposer({
   onSettings,
   onAssistant,
+  onSend,
+  disabled,
 }: {
   onSettings?: () => void;
   onAssistant?: () => void;
+  onSend?: (text: string) => void;
+  disabled?: boolean;
 }) {
+  const [value, setValue] = useState("");
+
+  const handleSend = () => {
+    if (!onSend || disabled || !value.trim()) return;
+    onSend(value.trim());
+    setValue("");
+  };
+
   return (
     <div className="composer">
       {onAssistant && <button aria-label="Open Yacy Assistant" onClick={onAssistant}>✦</button>}
-      <input aria-label="Message" placeholder="Message" />
+      <input
+        aria-label="Message"
+        placeholder="Message"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            handleSend();
+          }
+        }}
+      />
       {onSettings && <button aria-label="Open preferences" onClick={onSettings}>＋</button>}
+      {onSend && (
+        <button aria-label="Send message" className="composer-send" disabled={disabled || !value.trim()} onClick={handleSend}>
+          ➤
+        </button>
+      )}
     </div>
   );
 }
