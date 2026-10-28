@@ -148,3 +148,36 @@ def build_grounding_facts(
     if substitution_case:
         facts["substitution_case"] = substitution_case
     return facts
+
+
+def describe_opening_context(narrative_stage: NarrativeStage, facts: Dict[str, Any]) -> Optional[str]:
+    """A one-line description of what just happened right before this chat
+    session started, for when the customer's very first message has no prior
+    turns to react to (e.g. a bare "ok"/"fine"/"thanks"). Without this, the
+    assistant has no idea what such a short reply is even responding to and
+    tends to fall back on a generic "how can I help?" opener - this fills in
+    that missing context without inventing a fake conversation turn."""
+    order = facts.get("order")
+    if not order:
+        return None
+
+    if narrative_stage == "order_placed":
+        return (
+            f"This chat just started, right after the customer received their order confirmation for "
+            f"order {order.get('order_id')}, confirming delivery on {order.get('delivery_date')} between "
+            f"{order.get('delivery_slot')}. If their first message is just a short acknowledgement (e.g. "
+            f"'ok', 'fine', 'thanks', 'great'), respond to that specifically - e.g. confirm you'll keep them "
+            f"posted - rather than with a generic opening question."
+        )
+
+    substitution_case = facts.get("substitution_case")
+    if substitution_case and substitution_case.get("resolved"):
+        chosen = substitution_case.get("chosen_product")
+        return (
+            f"This chat just started, right after the customer chose '{chosen}' as their substitution and it "
+            f"was applied to order {order.get('order_id')}. If their first message is just a short "
+            f"acknowledgement (e.g. 'ok', 'fine', 'thanks'), respond to that specifically rather than with a "
+            f"generic opening question."
+        )
+
+    return None

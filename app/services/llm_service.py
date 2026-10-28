@@ -44,6 +44,11 @@ _KIND_GUIDANCE: Dict[str, str] = {
     # in the frontend, not inferred by the LLM from raw history - that branching
     # needs to be reliable every time. Each kind below is a single, narrow
     # instruction for turning an already-decided step into natural wording.
+    "FEEDBACK_ASK_CLARIFY": (
+        "The customer's last reply was ambiguous - it wasn't clearly a complaint or clearly fine. Do not guess "
+        "either way. Gently ask them to clarify, phrased close to the reference example's question, in a warm, "
+        "brief way. Do not apologise (we don't yet know there's anything to apologise for)."
+    ),
     "FEEDBACK_ASK_AREA": (
         "The customer's feedback was negative - read how strongly negative `customer_feedback` sounds. If it "
         "sounds like something actually went wrong (not just lukewarm), open with a short, genuine apology "
@@ -103,7 +108,15 @@ _CHAT_SYSTEM_PROMPT = (
     "facts explicitly confirm it happened - if a customer asks for an action to be taken, "
     "explain what you can see and that this would need to go through the proper process. "
     "4) Keep replies brief (1-3 sentences) and reply with the message text only - no quotes, "
-    "no preamble."
+    "no preamble. "
+    "5) If the customer's message is just a short acknowledgement with no actual question in it "
+    "(e.g. 'ok', 'fine', 'thanks', 'great', 'sounds good'), do not reply with a generic opener "
+    "like 'How can I assist you today?' or 'Let me know if you need help with anything' - that "
+    "reads as ignoring what they said and restarting the conversation. Instead give a short, "
+    "specific acknowledgement that responds to what they actually said, referencing the order "
+    "context if it fits naturally (e.g. confirming the delivery is still on track), and only "
+    "end with an offer to help further if it feels natural, not as a stock closing line. "
+    "6) No emoji unless the customer used one first."
 )
 
 _CHAT_FAILURE_FALLBACK = (

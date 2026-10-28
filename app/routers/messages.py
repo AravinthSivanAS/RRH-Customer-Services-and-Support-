@@ -52,6 +52,10 @@ def assistant_chat(request: AssistantChatRequest) -> AssistantChatResponse:
         request.customer_id, request.order_id, request.narrative_stage
     )
     history = assistant_service.get_session_history(request.customer_id)
+    if not history:
+        opening_context = assistant_service.describe_opening_context(request.narrative_stage, grounding_facts)
+        if opening_context:
+            grounding_facts["conversation_opening_context"] = opening_context
     session_messages = [*history, {"role": "user", "content": request.message}]
 
     reply, source = llm_service.generate_chat_reply(session_messages, grounding_facts)
