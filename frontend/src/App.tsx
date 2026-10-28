@@ -65,6 +65,9 @@ interface ComposerExchange {
   replyKind?: string;
   replyContext?: Record<string, unknown>;
   replyFallback?: string;
+  /** When true, this exchange's reply comes from the open-ended, memory-aware
+   * assistant chat instead of a fixed kind - see FeedbackReplyPlan.useAssistant. */
+  useAssistant?: boolean;
 }
 
 type FeedbackArea = "products" | "delivery";
@@ -385,51 +388,77 @@ function recordExchangeReply(setExchanges: Dispatch<SetStateAction<ComposerExcha
   setExchanges((prev) => prev.map((exchange, i) => (i === index ? { ...exchange, reply } : exchange)));
 }
 
-/**
- * Deciding whether a reply is positive or negative, and which area (products
- * vs delivery) a message is about, is done here in plain code rather than
- * left to the LLM - that branching needs to be reliable every time, whereas
- * asking an LLM to infer conversation state from raw history turned out not
- * to be. The LLM is still the one writing every word the customer sees.
- */
-function classifyFeedbackSentiment(text: string): "positive" | "negative" {
-  const normalized = text.trim().toLowerCase();
-  if (/^(no|nah|nope|not really|not at all)\b/.test(normalized)) return "negative";
-  if (/^(yes|yeah|yep|yup|sure)\b/.test(normalized)) return "positive";
-  const negativeMarkers = [
-    "bad", "poor", "terrible", "awful", "wrong", "issue", "problem", "late", "missing",
-    "damaged", "disappoint", "worse", "unhappy", "cold", "broken", "n't",
-  ];
-  const positiveMarkers = ["good", "great", "perfect", "happy", "fine", "excellent", "amazing", "love", "satisfied", "nice"];
-  const hasNegative = negativeMarkers.some((word) => normalized.includes(word));
-  const hasPositive = positiveMarkers.some((word) => normalized.includes(word));
-  if (hasPositive && !hasNegative) return "positive";
-  return hasNegative || !hasPositive ? "negative" : "positive";
+/** Patches a feedback exchange with its planned reply kind/context once
+ * classification has resolved - the exchange itself was already appended
+ * (so the customer's own message shows immediately) with no reply kind yet,
+ * which renders as a typing indicator until this fills it in. */
+function applyFeedbackPlan(setExchanges: Dispatch<SetStateAction<ComposerExchange[]>>, index: number, plan: FeedbackReplyPlan) {
+  setExchanges((prev) =>
+    prev.map((exchange, i) =>
+      i === index
+        ? { ...exchange, replyKind: plan.kind, replyContext: plan.context, replyFallback: plan.fallback, useAssistant: plan.useAssistant }
+        : exchange,
+    ),
+  );
 }
 
-function classifyFeedbackArea(text: string, itemNames: string[]): FeedbackArea | "both" | null {
-  const normalized = text.trim().toLowerCase();
-  const mentionsDelivery = /deliver|driver|late|timing|time slot|courier|arriv/.test(normalized);
-  const mentionsProducts =
-    /\bproduct|\bitem|\bbasket/.test(normalized) ||
-    itemNames.some((name) => name && normalized.includes(name.toLowerCase().split(" ")[0]));
-  if (/\bboth\b/.test(normalized) || (mentionsProducts && mentionsDelivery)) return "both";
-  if (mentionsProducts) return "products";
-  if (mentionsDelivery) return "delivery";
-  return null;
+/**
+ * Which stages of the feedback flow need to know the sentiment/area of the
+ * customer's reply before deciding what to do next - every other stage
+ * (free-text detail capture, or once the flow is done) doesn't need this
+ * classification at all.
+ */
+function feedbackStageNeedsClassification(stage: FeedbackFlowState["stage"]): boolean {
+  return stage === "awaiting-initial" || stage === "awaiting-area" || stage === "awaiting-which-first";
+}
+
+interface FeedbackClassification {
+  area: FeedbackArea | "both" | null;
+  sentiment: "negative" | "positive" | "neutral";
+}
+
+/**
+ * Judging whether a reply is actually a complaint and which area it's about
+ * needs real language understanding - a keyword scan reads "sorry i typed
+ * wrong, the delivery was great" as a delivery complaint just because it
+ * contains the word "delivery". So this asks the backend's LLM-backed
+ * classifier (which judges real meaning, including corrections) instead of
+ * pattern-matching locally. The FSM branching itself (what to do with that
+ * classification) stays deterministic code in planFeedbackReply below - that
+ * needs to be reliable every time, whereas free-form LLM-driven branching
+ * kept causing loops and repeated questions.
+ */
+async function classifyFeedback(text: string, history: Array<{ speaker: "maya" | "yacy"; text: string }>): Promise<FeedbackClassification> {
+  try {
+    const result = await api.classifyFeedback({ text, history });
+    return { area: result.area, sentiment: result.sentiment };
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn("[yacy-llm] feedback classification failed; treating as neutral/unclear", error);
+    return { area: null, sentiment: "neutral" };
+  }
 }
 
 interface FeedbackReplyPlan {
+  /** When true, this turn is routed to the open-ended assistant chat instead
+   * of a fixed kind - used once the structured feedback flow has concluded
+   * and the customer is just chatting, so they can ask anything naturally. */
+  useAssistant?: boolean;
   kind: string;
   context: Record<string, unknown>;
   fallback: string;
   nextFlow: FeedbackFlowState;
 }
 
-function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Record<string, unknown>, itemNames: string[]): FeedbackReplyPlan {
+function planFeedbackReply(
+  text: string,
+  classification: FeedbackClassification,
+  flow: FeedbackFlowState,
+  orderFacts: Record<string, unknown>,
+): FeedbackReplyPlan {
   switch (flow.stage) {
     case "awaiting-initial": {
-      if (classifyFeedbackSentiment(text) === "positive") {
+      if (classification.sentiment !== "negative") {
         return {
           kind: "FEEDBACK_THANKS_POSITIVE",
           context: { customer_feedback: text, ...orderFacts },
@@ -445,8 +474,19 @@ function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Re
       };
     }
     case "awaiting-area": {
-      const area = classifyFeedbackArea(text, itemNames);
-      if (area === "both") {
+      // The customer may use this reply to retract/clarify their complaint
+      // (e.g. "sorry i typed wrong, the delivery was great") - a topic word
+      // like "delivery" appearing doesn't mean it's still a complaint about
+      // delivery, so sentiment is checked before area.
+      if (classification.sentiment !== "negative") {
+        return {
+          kind: "FEEDBACK_THANKS_POSITIVE",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Thank you for clarifying, Maya - glad to hear that!",
+          nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      if (classification.area === "both") {
         return {
           kind: "FEEDBACK_ASK_WHICH_FIRST",
           context: { customer_feedback: text, ...orderFacts },
@@ -454,7 +494,7 @@ function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Re
           nextFlow: { ...flow, stage: "awaiting-which-first", pendingAreas: ["products", "delivery"] },
         };
       }
-      const singleArea: FeedbackArea = area ?? "products";
+      const singleArea: FeedbackArea = classification.area === "products" || classification.area === "delivery" ? classification.area : "products";
       return {
         kind: "FEEDBACK_ASK_AREA_DETAIL",
         context: { customer_feedback: text, area: singleArea, ...orderFacts },
@@ -463,7 +503,15 @@ function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Re
       };
     }
     case "awaiting-which-first": {
-      const picked = classifyFeedbackArea(text, itemNames);
+      if (classification.sentiment !== "negative") {
+        return {
+          kind: "FEEDBACK_THANKS_POSITIVE",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Thank you for clarifying, Maya - glad to hear that!",
+          nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      const picked = classification.area;
       const area: FeedbackArea = picked === "products" || picked === "delivery" ? picked : flow.pendingAreas[0];
       const remaining = flow.pendingAreas.filter((candidate) => candidate !== area);
       return {
@@ -495,8 +543,9 @@ function planFeedbackReply(text: string, flow: FeedbackFlowState, orderFacts: Re
     case "done":
     default:
       return {
-        kind: "FEEDBACK_THANKS",
-        context: { customer_feedback: text, ...orderFacts },
+        useAssistant: true,
+        kind: "ASSISTANT_CHAT",
+        context: {},
         fallback: "Thanks for your message! Let us know if there's anything else we can help with.",
         nextFlow: flow,
       };
@@ -514,28 +563,34 @@ function makeMessage(speaker: Speaker, text: string): ChatMessage {
  * text and then swapping it out. Always resolves to `fallback` if the
  * backend/LLM call fails, so the demo narrative never gets stuck.
  */
-function useGeneratedMessage(
-  kind: string,
-  context: Record<string, unknown>,
+/**
+ * Shared by every LLM-backed bubble (scripted/kind-based and open-ended
+ * assistant chat alike): fetch once per distinct `key`, and once any text has
+ * ever resolved for this bubble, keep showing it even if `key` later changes
+ * under it - never blank back out to the fallback/typing state. A newer
+ * result (if the key does change) replaces it quietly once it arrives.
+ */
+function useAsyncReply(
+  key: string,
+  fetchReply: () => Promise<{ text: string; source: string }>,
   fallback: string,
-  skip = false,
+  skip: boolean,
+  logLabel: string,
 ): { text: string; isPending: boolean } {
-  const key = `${kind}::${JSON.stringify(context)}`;
   const [resolved, setResolved] = useState<{ key: string; text: string } | null>(null);
 
   useEffect(() => {
     if (skip) return;
     let cancelled = false;
-    api
-      .generateMessage({ kind, context, fallback })
+    fetchReply()
       .then((result) => {
         // eslint-disable-next-line no-console
-        console.info(`[yacy-llm] ${kind} -> source=${result.source}`, result.message);
-        if (!cancelled) setResolved({ key, text: result.message });
+        console.info(`[yacy-llm] ${logLabel} -> source=${result.source}`, result.text);
+        if (!cancelled) setResolved({ key, text: result.text });
       })
       .catch((error) => {
         // eslint-disable-next-line no-console
-        console.warn(`[yacy-llm] ${kind} -> request failed, using fallback`, error);
+        console.warn(`[yacy-llm] ${logLabel} -> request failed, using fallback`, error);
         if (!cancelled) setResolved({ key, text: fallback });
       });
     return () => {
@@ -544,14 +599,50 @@ function useGeneratedMessage(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, skip]);
 
-  // Once this bubble has ever resolved, keep showing that text even if its
-  // input later shifts under it (e.g. a newer message changed shared
-  // context) - never blank back out to the fallback/typing state, and let
-  // any newer result replace it quietly once it arrives.
   return {
     text: resolved ? resolved.text : fallback,
     isPending: resolved === null && !skip,
   };
+}
+
+function useGeneratedMessage(
+  kind: string,
+  context: Record<string, unknown>,
+  fallback: string,
+  skip = false,
+): { text: string; isPending: boolean } {
+  const key = `${kind}::${JSON.stringify(context)}`;
+  return useAsyncReply(
+    key,
+    () => api.generateMessage({ kind, context, fallback }).then((result) => ({ text: result.message, source: result.source })),
+    fallback,
+    skip,
+    kind,
+  );
+}
+
+/** Open-ended, memory-aware assistant chat - the backend owns conversation
+ * history per customer, so the key only needs the message itself to stay
+ * stable forever once sent (no client-side history snapshot required). */
+function useAssistantReply(
+  customerId: string,
+  orderId: string | null | undefined,
+  message: string,
+  fallback: string,
+  narrativeStage: "order_placed" | "current" = "current",
+  skip = false,
+): { text: string; isPending: boolean } {
+  const key = `assistant::${customerId}::${orderId ?? ""}::${narrativeStage}::${message}`;
+  return useAsyncReply(
+    key,
+    () =>
+      api
+        .assistantChat({ customer_id: customerId, order_id: orderId ?? null, message, narrative_stage: narrativeStage })
+        .then((result) => ({ text: result.reply, source: result.source })),
+    fallback,
+    skip,
+    "assistant-chat",
+  );
 }
 
 export default function App() {
@@ -1071,17 +1162,13 @@ function PhoneExperience({
                 {exchange.reply ? (
                   <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
                 ) : (
-                  <GeneratedChatBubble
-                    speaker="yacy"
-                    kind="ORDER_CONFIRMATION_FOLLOWUP"
-                    context={{
-                      customer_message: exchange.text,
-                      customer_name: state.customer?.customer_name,
-                      ...buildOrderFacts(state),
-                      conversation_history: exchange.history,
-                    }}
+                  <AssistantChatBubble
+                    customerId={CUSTOMER_ID}
+                    orderId={order.order_id}
+                    message={exchange.text}
                     fallback="Thanks for your message! Let us know if there's anything else about your order."
                     time={exchange.time}
+                    narrativeStage="order_placed"
                     onResolved={(text) => recordExchangeReply(setOrderExchanges, index, text)}
                   />
                 )}
@@ -1211,14 +1298,10 @@ function PhoneExperience({
             {exchange.reply ? (
               <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
             ) : (
-              <GeneratedChatBubble
-                speaker="yacy"
-                kind="SUBSTITUTION_FOLLOWUP"
-                context={{
-                  customer_message: exchange.text,
-                  ...buildOrderFacts(state),
-                  conversation_history: exchange.history,
-                }}
+              <AssistantChatBubble
+                customerId={CUSTOMER_ID}
+                orderId={state.order?.order_id}
+                message={exchange.text}
                 fallback="Thanks for your message! Let us know if there's anything else we can help with."
                 time={exchange.time}
                 onResolved={(text) => recordExchangeReply(setChatExchanges, index, text)}
@@ -1251,6 +1334,19 @@ function PhoneExperience({
                 <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
                 {exchange.reply ? (
                   <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
+                ) : !exchange.replyKind && !exchange.useAssistant ? (
+                  // Classifying what this reply is actually about before we even
+                  // know which kind to generate wording for - see classifyFeedback.
+                  <TypingBubble speaker="yacy" />
+                ) : exchange.useAssistant ? (
+                  <AssistantChatBubble
+                    customerId={CUSTOMER_ID}
+                    orderId={state.order?.order_id}
+                    message={exchange.text}
+                    fallback={exchange.replyFallback ?? "Thanks for your message! Let us know if there's anything else we can help with."}
+                    time={exchange.time}
+                    onResolved={(text) => recordExchangeReply(setFeedbackExchanges, index, text)}
+                  />
                 ) : (
                   <GeneratedChatBubble
                     speaker="yacy"
@@ -1275,37 +1371,27 @@ function PhoneExperience({
           onAssistant={() => onNavigate("assistant")}
           onSend={
             state.stage === "order-confirmation"
-              ? (text) =>
-                  setOrderExchanges((prev) => [
-                    ...prev,
-                    { text, time: currentTime(), history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges) },
-                  ])
+              ? (text) => setOrderExchanges((prev) => [...prev, { text, time: currentTime(), history: [] }])
               : showConfirmation
-                ? (text) =>
-                    setChatExchanges((prev) => [
-                      ...prev,
-                      { text, time: currentTime(), history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges) },
-                    ])
+                ? (text) => setChatExchanges((prev) => [...prev, { text, time: currentTime(), history: [] }])
                 : state.stage === "delivered"
                   ? (text) => {
-                      const plan = planFeedbackReply(
-                        text,
-                        feedbackFlow,
-                        buildOrderFacts(state),
-                        state.order?.items.map((item) => item.product_name) ?? [],
-                      );
-                      setFeedbackFlow(plan.nextFlow);
-                      setFeedbackExchanges((prev) => [
-                        ...prev,
-                        {
-                          text,
-                          time: currentTime(),
-                          history: buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges),
-                          replyKind: plan.kind,
-                          replyContext: plan.context,
-                          replyFallback: plan.fallback,
-                        },
-                      ]);
+                      // Appended immediately (no replyKind yet) so the customer's own
+                      // message shows right away; it renders as a typing indicator
+                      // until classification + planning below fill in the reply.
+                      const index = feedbackExchanges.length;
+                      const historySnapshot = buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges);
+                      setFeedbackExchanges((prev) => [...prev, { text, time: currentTime(), history: historySnapshot }]);
+
+                      const classificationPromise: Promise<FeedbackClassification> = feedbackStageNeedsClassification(feedbackFlow.stage)
+                        ? classifyFeedback(text, historySnapshot)
+                        : Promise.resolve({ area: null, sentiment: "neutral" });
+
+                      void classificationPromise.then((classification) => {
+                        const plan = planFeedbackReply(text, classification, feedbackFlow, buildOrderFacts(state));
+                        setFeedbackFlow(plan.nextFlow);
+                        applyFeedbackPlan(setFeedbackExchanges, index, plan);
+                      });
                     }
                   : undefined
           }
@@ -1437,6 +1523,34 @@ function GeneratedChatBubble({
 
   if (isPending) return <TypingBubble speaker={speaker} />;
   return <ChatBubble speaker={speaker} text={text} time={time} />;
+}
+
+function AssistantChatBubble({
+  customerId,
+  orderId,
+  message,
+  fallback,
+  time,
+  narrativeStage = "current",
+  onResolved,
+}: {
+  customerId: string;
+  orderId: string | null | undefined;
+  message: string;
+  fallback: string;
+  time: string;
+  narrativeStage?: "order_placed" | "current";
+  onResolved?: (text: string) => void;
+}) {
+  const { text, isPending } = useAssistantReply(customerId, orderId, message, fallback, narrativeStage);
+
+  useEffect(() => {
+    if (!isPending) onResolved?.(text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPending]);
+
+  if (isPending) return <TypingBubble speaker="yacy" />;
+  return <ChatBubble speaker="yacy" text={text} time={time} />;
 }
 
 interface SequencedBubbleSpec {
