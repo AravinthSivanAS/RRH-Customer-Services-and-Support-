@@ -217,6 +217,29 @@ export interface GenerateMessageResponse {
   source: "llm" | "fallback";
 }
 
+export interface AssistantChatRequest {
+  customer_id: string;
+  order_id?: string | null;
+  message: string;
+  narrative_stage?: "order_placed" | "current";
+}
+
+export interface AssistantChatResponse {
+  reply: string;
+  source: "llm" | "fallback";
+}
+
+export interface ClassifyFeedbackRequest {
+  text: string;
+  history?: Array<{ speaker: string; text: string }>;
+}
+
+export interface ClassifyFeedbackResponse {
+  area: "products" | "delivery" | "both" | null;
+  sentiment: "negative" | "positive" | "neutral";
+  source: "llm" | "fallback";
+}
+
 export interface SubstitutionSelectionRequest {
   customer_id: string;
   original_sku_id: string;
@@ -339,6 +362,16 @@ export const api = {
     }),
   generateMessage: (payload: GenerateMessageRequest) =>
     request<GenerateMessageResponse>("/api/messages/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  assistantChat: (payload: AssistantChatRequest) =>
+    request<AssistantChatResponse>("/api/messages/chat", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  classifyFeedback: (payload: ClassifyFeedbackRequest) =>
+    request<ClassifyFeedbackResponse>("/api/messages/classify-feedback", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

@@ -5,7 +5,7 @@ from typing import Any, Dict
 from fastapi import APIRouter
 
 from app.repositories.json_repository import data_store
-from app.services import inventory_service
+from app.services import assistant_service, inventory_service
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
 
@@ -16,6 +16,7 @@ _SCENARIO_STORE_ID = "STORE-LEEDS-CENTRAL"
 @router.post("/reset")
 def reset_demo_data() -> Dict[str, Any]:
     data_store.reset_all()
+    assistant_service.clear_all_sessions()
     return {"status": "RESET_COMPLETE", "message": "All mock data restored to its original state"}
 
 

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("yacy.near.llm")
 
@@ -45,9 +45,10 @@ _KIND_GUIDANCE: Dict[str, str] = {
     # needs to be reliable every time. Each kind below is a single, narrow
     # instruction for turning an already-decided step into natural wording.
     "FEEDBACK_ASK_AREA": (
-        "The customer's feedback was negative. Acknowledge that briefly, then ask ONE question: did the "
-        "issue concern the products, the delivery, or both? Do not name a specific product. Never use: "
-        "sorry, apolog, on board, improve, remember."
+        "The customer's feedback was negative - read how strongly negative `customer_feedback` sounds. If it "
+        "sounds like something actually went wrong (not just lukewarm), open with a short, genuine apology "
+        "that fits what they said, not a generic 'sorry for any inconvenience' stock phrase. Then ask ONE "
+        "question: did the issue concern the products, the delivery, or both? Do not name a specific product."
     ),
     "FEEDBACK_ASK_WHICH_FIRST": (
         "The customer said both the products and the delivery had problems. Ask ONE short question: would "
@@ -61,16 +62,21 @@ _KIND_GUIDANCE: Dict[str, str] = {
     ),
     "FEEDBACK_ASK_NEXT_AREA_DETAIL": (
         "Acknowledge in a few words what the customer just told you about `acknowledged_area` (their words "
-        "are in `customer_feedback`), then ask ONE short question for detail about `next_area` specifically - "
+        "are in `customer_feedback`) - if what they described sounds genuinely bad (damaged, wrong, rotten, "
+        "very late, etc.), that acknowledgement should include a short, sincere apology naming the specific "
+        "thing, not a generic one. Then ask ONE short question for detail about `next_area` specifically - "
         "same rules as FEEDBACK_ASK_AREA_DETAIL (don't name a specific product unless the customer already "
-        "has, and don't mention `acknowledged_area` again beyond the brief acknowledgement)."
+        "has, and don't dwell on `acknowledged_area` beyond that one sentence)."
     ),
     "FEEDBACK_FINAL_ACK": (
         "The customer has now given detail on every area that was a problem - `details` in context is an "
-        "object keyed by area ('products' and/or 'delivery') with what they said about each. Write ONE warm, "
-        "considerate closing message that specifically references what they told you for EACH area present "
-        "in `details` (not a generic line), reassuring them it will be looked into for next time. No question "
-        "mark. Never use: sorry, apolog, on board, remember, or the literal word 'improve'."
+        "object keyed by area ('products' and/or 'delivery') with what they said about each. Judge how "
+        "serious what they described is (e.g. rotten/damaged food, a late or missing delivery is serious; a "
+        "minor gripe is not). Write ONE closing message that specifically references what they told you for "
+        "EACH area present in `details` (not a generic line): if what happened was genuinely bad, start with "
+        "a short, sincere apology that names the specific thing that went wrong (not a stock 'sorry for the "
+        "inconvenience' line) before reassuring them it will be looked into; if it was minor, a warm "
+        "acknowledgement is enough without over-apologising. No question mark."
     ),
     "FEEDBACK_THANKS_POSITIVE": (
         "The customer's feedback was positive. Write a short, warm thank-you - if `customer_feedback` "
@@ -82,16 +88,28 @@ _KIND_GUIDANCE: Dict[str, str] = {
         "and warmly to whatever the customer just said in `customer_feedback`, using the order facts in "
         "context if relevant. Keep it brief."
     ),
-    "SUBSTITUTION_FOLLOWUP": (
-        "Answer the customer's question directly using the order items, substitution, and delivery facts "
-        "given in context - e.g. if they ask for a list of products or what was delivered, name the actual "
-        "items from context instead of a generic acknowledgement."
-    ),
-    "ORDER_CONFIRMATION_FOLLOWUP": (
-        "Answer the customer's question directly using the order items and delivery facts given in "
-        "context - e.g. if they ask to list the products, list them by name."
-    ),
 }
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are Yacy's customer support assistant, chatting with a customer over WhatsApp about "
+    "their grocery order. Be warm, natural, and conversational - like a helpful human agent, "
+    "not a rigid script. Remember and build on what's already been said in this conversation. "
+    "Hard rules that always apply: "
+    "1) Only state facts given to you below or earlier in this conversation - never invent "
+    "prices, dates, products, order details, or refund/delivery status. "
+    "2) If something you're asked isn't covered by the facts you have, say plainly that you "
+    "don't have that detail, rather than guessing or deflecting to 'check your account'. "
+    "3) Never say an action (a refund, a change, a cancellation) has been completed unless the "
+    "facts explicitly confirm it happened - if a customer asks for an action to be taken, "
+    "explain what you can see and that this would need to go through the proper process. "
+    "4) Keep replies brief (1-3 sentences) and reply with the message text only - no quotes, "
+    "no preamble."
+)
+
+_CHAT_FAILURE_FALLBACK = (
+    "I couldn't look that up just now - could you try asking again, or is there something "
+    "else I can help with?"
+)
 
 _client: Optional[object] = None
 _client_checked = False
@@ -178,3 +196,114 @@ def generate_message(
     except Exception:
         logger.exception("LLM message generation failed for kind=%s; using fallback", kind)
         return fallback, "fallback"
+
+
+def generate_chat_reply(
+    session_messages: list[Dict[str, str]], grounding_facts: Dict[str, Any]
+) -> Tuple[str, str]:
+    """Generates a conversational reply for the open-ended assistant chat.
+
+    Unlike `generate_message`, this sends the real back-and-forth as a proper
+    `messages` array (not a single flattened blob), so the model has genuine
+    multi-turn memory - it can resolve "it"/"that product"/"my previous
+    order" the way a real chat does. Never cached: the whole point is that
+    each reply depends on the live conversation and the specific customer's
+    data, so caching here would risk leaking one customer's answer into
+    another's conversation, or reusing a stale answer as the chat moves on.
+
+    `session_messages` is the prior turns for this customer only, each
+    `{"role": "user"|"assistant", "content": str}`, ending with the customer's
+    latest message - the caller (the /api/messages/chat route) owns persisting
+    this per customer_id.
+
+    Returns (reply_text, source) where source is "llm" or "fallback".
+    """
+    client = _get_client()
+    if client is None:
+        return _CHAT_FAILURE_FALLBACK, "fallback"
+
+    default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
+    model = os.environ.get("OPENAI_MODEL", default_model)
+    system_content = f"{_CHAT_SYSTEM_PROMPT}\n\nFacts you may use (JSON, do not invent beyond this): {grounding_facts}"
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_content}, *session_messages],
+            max_tokens=200,
+            temperature=0.6,
+            timeout=8,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text, "llm"
+        return _CHAT_FAILURE_FALLBACK, "fallback"
+    except Exception:
+        logger.exception("Assistant chat reply failed")
+        return _CHAT_FAILURE_FALLBACK, "fallback"
+
+
+_VALID_AREAS = {"products", "delivery", "both", "none"}
+_VALID_SENTIMENTS = {"negative", "positive", "neutral"}
+
+
+def classify_feedback_signal(text: str, history: List[Dict[str, str]]) -> Tuple[Dict[str, Any], str]:
+    """Classifies a customer's reply within the deterministic feedback-collection
+    flow: which area (products/delivery/both/none) it's actually about, and
+    whether it's a complaint, a retraction/satisfaction, or neutral - judged
+    from real meaning, not keyword matching. This exists because a plain
+    keyword scan reads "sorry i typed wrong, the delivery was great" as a
+    delivery complaint (it contains the word "delivery") when it's the
+    opposite. The branching logic that USES this classification stays
+    deterministic code (see planFeedbackReply in the frontend) - only the
+    judgement of what the customer actually meant is handed to the LLM.
+
+    Always degrades to a safe, unopinionated classification
+    (`{"area": None, "sentiment": "neutral"}`) if the LLM is unavailable or
+    fails, so the caller can fall back to asking a clarifying question rather
+    than guessing.
+    """
+    default = {"area": None, "sentiment": "neutral"}
+    client = _get_client()
+    if client is None:
+        return default, "fallback"
+
+    default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
+    model = os.environ.get("OPENAI_MODEL", default_model)
+    history_text = "\n".join(f"{turn.get('speaker', '?')}: {turn.get('text', '')}" for turn in history) or "(no prior turns)"
+    user_prompt = (
+        f"Conversation so far:\n{history_text}\n\n"
+        f'The customer just replied: "{text}"\n\n'
+        "Classify this reply. Respond with ONLY a JSON object, no other text:\n"
+        '{"area": "products" | "delivery" | "both" | "none", "sentiment": "negative" | "positive" | "neutral"}\n\n'
+        "`area`: which topic the reply is actually about, judged from its real meaning in context - not just "
+        "which words appear. If the customer is correcting an earlier statement, or clarifying that something "
+        "is actually fine, reflect that in your judgement rather than pattern-matching on keywords. "
+        "`sentiment`: whether THIS specific reply expresses a complaint (negative), satisfaction or a retraction "
+        "of an earlier complaint (positive), or is neutral/unclear."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You classify short customer-support replies. Reply with strict JSON only - no prose, no markdown fences."},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=50,
+            temperature=0,
+            timeout=6,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        area = parsed.get("area")
+        if area not in _VALID_AREAS:
+            area = "none"
+        sentiment = parsed.get("sentiment")
+        if sentiment not in _VALID_SENTIMENTS:
+            sentiment = "neutral"
+        return {"area": None if area == "none" else area, "sentiment": sentiment}, "llm"
+    except Exception:
+        logger.exception("Feedback signal classification failed")
+        return default, "fallback"
