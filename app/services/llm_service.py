@@ -83,15 +83,18 @@ _KIND_GUIDANCE: Dict[str, str] = {
         "context if relevant. Keep it brief."
     ),
     "SUBSTITUTION_FOLLOWUP": (
-        "Answer the customer's question directly using the order items, substitution, and delivery facts "
-        "given in context - e.g. if they ask for a list of products or what was delivered, name the actual "
-        "items from context instead of a generic acknowledgement."
+        "Answer the customer's latest message directly using the order items, substitution, and delivery "
+        "facts given in context. If they ask for a product list, name the actual products and quantities "
+        "from context. Do not give a generic acknowledgement or ask them to contact us."
     ),
     "ORDER_CONFIRMATION_FOLLOWUP": (
-        "Answer the customer's question directly using the order items and delivery facts given in "
-        "context - e.g. if they ask to list the products, list them by name."
+        "Answer the customer's latest message directly using the order items and delivery facts given in "
+        "context. If they ask for a product list, list the actual product names and quantities from context. "
+        "Do not give a generic acknowledgement or ask them to contact us."
     ),
 }
+
+_FOLLOWUP_KINDS = {"ORDER_CONFIRMATION_FOLLOWUP", "SUBSTITUTION_FOLLOWUP"}
 
 _client: Optional[object] = None
 _client_checked = False
@@ -150,12 +153,26 @@ def generate_message(
     default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
     model = os.environ.get("OPENAI_MODEL", default_model)
     guidance = _KIND_GUIDANCE.get(kind)
+    if kind in _FOLLOWUP_KINDS:
+        example_prompt = (
+            "\nWrite a direct answer to the customer's latest message. "
+            "Do not use a generic acknowledgement."
+        )
+        guidance_prompt = f"\nInstructions for this kind: {guidance}" if guidance else ""
+    else:
+        example_prompt = (
+            f"\nReference example, for length/format only - its tone may be wrong for this specific case, "
+            f"follow the instructions above it instead: {fallback}"
+        )
+        guidance_prompt = (
+            f"\nInstructions for this kind (these override the reference example's tone above): {guidance}"
+            if guidance
+            else ""
+        )
     user_prompt = (
         f"Message kind: {kind}\n"
-        f"Context facts (JSON): {context}\n"
-        f"Reference example, for length/format only - its tone may be wrong for this specific case, "
-        f"follow the instructions above it instead: {fallback}"
-        + (f"\nInstructions for this kind (these override the reference example's tone above): {guidance}" if guidance else "")
+        f"Context facts (JSON): {context}"
+        f"{example_prompt}{guidance_prompt}"
     )
 
     try:

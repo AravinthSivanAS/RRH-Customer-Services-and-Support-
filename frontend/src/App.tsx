@@ -355,7 +355,9 @@ function buildOrderFacts(state: JourneyState): Record<string, unknown> {
           ? "out_for_delivery"
           : "confirmed_not_yet_delivered",
     items: order.items.map((item) => ({ product_name: item.product_name, quantity: item.quantity, status: item.item_status })),
-    original_item_out_of_stock: originalItem?.product_name,
+    ...(state.caseDetails && originalItem?.item_status === "OUT_OF_STOCK"
+      ? { original_item_out_of_stock: originalItem.product_name }
+      : {}),
     substitution_chosen: replacementItem?.product_name,
     resolution_choice: state.notification?.responded_resolution_choice ?? undefined,
   };
