@@ -14,6 +14,12 @@ import {
 import Logo from "./Logo";
 
 const CUSTOMER_ID = "CUST-1001";
+// Used both to render the scripted delivery-feedback prompt bubble and to
+// seed the feedback classifier's context for the customer's first reply to
+// it - that prompt is a scripted message, not part of the free-text exchange
+// history, so without this the classifier has no idea what a bare "no" is
+// even answering.
+const DELIVERED_FEEDBACK_PROMPT_FALLBACK = "Was today’s swap right for you?";
 const ORDER_ID = "ORD-2026-10001";
 const STORE_ID = "STORE-LEEDS-CENTRAL";
 const ORIGINAL_SKU = "SKU-MEADOW-LF-1L";
@@ -456,12 +462,25 @@ function planFeedbackReply(
 ): FeedbackReplyPlan {
   switch (flow.stage) {
     case "awaiting-initial": {
-      if (classification.sentiment !== "negative") {
+      if (classification.sentiment === "positive") {
         return {
           kind: "FEEDBACK_THANKS_POSITIVE",
           context: { customer_feedback: text, ...orderFacts },
           fallback: "Thank you for your feedback, Maya - glad everything was just as you wanted!",
           nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      // An ambiguous/unclear reply here must NOT be silently treated as "all
+      // good" and end the conversation - that's exactly how a misread "no"
+      // ends up getting a cheerful "glad everything went smoothly" reply.
+      // Ask plainly instead, and stay on this same stage to re-classify
+      // whatever the customer says next.
+      if (classification.sentiment === "neutral") {
+        return {
+          kind: "FEEDBACK_ASK_CLARIFY",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Just to check - was everything with your order okay, or was there an issue?",
+          nextFlow: { ...flow, stage: "awaiting-initial" },
         };
       }
       return {
@@ -476,12 +495,20 @@ function planFeedbackReply(
       // (e.g. "sorry i typed wrong, the delivery was great") - a topic word
       // like "delivery" appearing doesn't mean it's still a complaint about
       // delivery, so sentiment is checked before area.
-      if (classification.sentiment !== "negative") {
+      if (classification.sentiment === "positive") {
         return {
           kind: "FEEDBACK_THANKS_POSITIVE",
           context: { customer_feedback: text, ...orderFacts },
           fallback: "Thank you for clarifying, Maya - glad to hear that!",
           nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      if (classification.sentiment === "neutral") {
+        return {
+          kind: "FEEDBACK_ASK_CLARIFY",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Just to check - did the issue concern the products, the delivery, or both?",
+          nextFlow: { ...flow, stage: "awaiting-area" },
         };
       }
       if (classification.area === "both") {
@@ -501,12 +528,20 @@ function planFeedbackReply(
       };
     }
     case "awaiting-which-first": {
-      if (classification.sentiment !== "negative") {
+      if (classification.sentiment === "positive") {
         return {
           kind: "FEEDBACK_THANKS_POSITIVE",
           context: { customer_feedback: text, ...orderFacts },
           fallback: "Thank you for clarifying, Maya - glad to hear that!",
           nextFlow: { ...flow, stage: "done" },
+        };
+      }
+      if (classification.sentiment === "neutral") {
+        return {
+          kind: "FEEDBACK_ASK_CLARIFY",
+          context: { customer_feedback: text, ...orderFacts },
+          fallback: "Just to check - would you like to detail the products or the delivery first?",
+          nextFlow: { ...flow, stage: "awaiting-which-first" },
         };
       }
       const picked = classification.area;
@@ -568,6 +603,13 @@ function makeMessage(speaker: Speaker, text: string): ChatMessage {
  * under it - never blank back out to the fallback/typing state. A newer
  * result (if the key does change) replaces it quietly once it arrives.
  */
+// A cached/fast response can come back in well under a human's reaction
+// time, which made the "typing…" indicator flash invisibly and made a run of
+// bubbles look like they all popped in together instead of one by one. This
+// guarantees every bubble's typing indicator is on screen for at least this
+// long, regardless of how fast the underlying call actually resolves.
+const MIN_TYPING_INDICATOR_MS = 700;
+
 function useAsyncReply(
   key: string,
   fetchReply: () => Promise<{ text: string; source: string }>,
@@ -580,16 +622,30 @@ function useAsyncReply(
   useEffect(() => {
     if (skip) return;
     let cancelled = false;
+    const startedAt = Date.now();
+
+    const reveal = (text: string) => {
+      if (cancelled) return;
+      const remaining = MIN_TYPING_INDICATOR_MS - (Date.now() - startedAt);
+      if (remaining > 0) {
+        setTimeout(() => {
+          if (!cancelled) setResolved({ key, text });
+        }, remaining);
+      } else {
+        setResolved({ key, text });
+      }
+    };
+
     fetchReply()
       .then((result) => {
         // eslint-disable-next-line no-console
         console.info(`[yacy-llm] ${logLabel} -> source=${result.source}`, result.text);
-        if (!cancelled) setResolved({ key, text: result.text });
+        reveal(result.text);
       })
       .catch((error) => {
         // eslint-disable-next-line no-console
         console.warn(`[yacy-llm] ${logLabel} -> request failed, using fallback`, error);
-        if (!cancelled) setResolved({ key, text: fallback });
+        reveal(fallback);
       });
     return () => {
       cancelled = true;
@@ -936,6 +992,9 @@ export default function App() {
                 reply={reply}
                 setReply={setReply}
                 onSendReply={sendMarcusReply}
+                orderExchanges={orderExchanges}
+                chatExchanges={chatExchanges}
+                feedbackExchanges={feedbackExchanges}
               />
             </section>
           </>
@@ -1029,17 +1088,37 @@ function PhoneExperience({
         ) : (
           <div className="tracking-body">
             <div className="fictional-map">
-              <div className="map-road map-road--one" />
-              <div className="map-road map-road--two" />
-              <div className="map-road map-road--three" />
-              <svg className="route-line" viewBox="0 0 260 160" preserveAspectRatio="none" aria-hidden="true">
-                <path id="delivery-route" d="M43 122 L215 38" fill="none" stroke="#18864b" strokeWidth="4" strokeDasharray="7 6" />
-                <g className="map-location map-location--store" transform="translate(24 108)">
+              <svg className="map-canvas" viewBox="0 0 260 190" preserveAspectRatio="none" aria-hidden="true">
+                <rect x="0" y="0" width="260" height="190" fill="#eef1ea" />
+                <rect className="map-block" x="10" y="12" width="50" height="34" />
+                <rect className="map-block" x="70" y="100" width="44" height="30" />
+                <rect className="map-block" x="150" y="118" width="40" height="26" />
+                <rect className="map-block" x="190" y="20" width="36" height="24" />
+                <rect className="map-block map-block--park" x="112" y="30" width="46" height="34" rx="4" />
+                <path className="map-road-line map-road-line--minor" d="M-10 64 L270 48" />
+                <path className="map-road-line" d="M34 -10 L10 200" />
+                <path className="map-road-line map-road-line--route-road" d="M-10 150 L270 150" />
+                <path className="map-road-line map-road-line--route-road" d="M217 -10 L217 200" />
+                <text className="map-street-label" x="110" y="144">Leeds Rd</text>
+                <text className="map-street-label" x="150" y="40">Mill Ln</text>
+                {/* Follows the roads above (right along Leeds Rd, then up the cross
+                    street to Home) instead of cutting a straight line through the
+                    blocks - dash pattern + round caps renders as discrete dots. */}
+                <path
+                  id="delivery-route"
+                  d="M43 150 L217 150 L217 36"
+                  fill="none"
+                  stroke="#18864b"
+                  strokeWidth="6"
+                  strokeLinecap="round"
+                  strokeDasharray="0.1 12"
+                />
+                <g className="map-location map-location--store" transform="translate(24 136)">
                   <path d="M2 8h19v13H2zM0 8l3-6h17l3 6v3H0z" fill="#fff" stroke="#53675a" strokeWidth="1.5" strokeLinejoin="round" />
                   <path d="M7 14h5v7H7zM15 13h3v3h-3z" fill="#c9dfd0" stroke="#53675a" strokeWidth="1" />
                   <text x="0" y="32">STORE</text>
                 </g>
-                <g className="map-location map-location--home" transform="translate(213 17)">
+                <g className="map-location map-location--home" transform="translate(215 15)">
                   <path d="M1 10 10 2l9 8v11h-7v-7H8v7H1z" fill="#fff" stroke="#53675a" strokeWidth="1.5" strokeLinejoin="round" />
                   <text x="-1" y="31">HOME</text>
                 </g>
@@ -1055,6 +1134,7 @@ function PhoneExperience({
                   </g>
                 </g>
               </svg>
+              <button className="map-locate-button" aria-label="Center map" type="button">◎</button>
             </div>
             <div className="tracking-summary">
               <strong>Arriving 18:40 · 3 stops away</strong>
@@ -1322,7 +1402,7 @@ function PhoneExperience({
                   speaker: "yacy",
                   kind: "DELIVERED_FEEDBACK_PROMPT",
                   context: {},
-                  fallback: "Was today’s swap right for you?",
+                  fallback: DELIVERED_FEEDBACK_PROMPT_FALLBACK,
                   time: "18:40",
                 },
               ]}
@@ -1381,8 +1461,22 @@ function PhoneExperience({
                       const historySnapshot = buildConversationHistory(orderExchanges, chatExchanges, feedbackExchanges);
                       setFeedbackExchanges((prev) => [...prev, { text, time: currentTime(), history: historySnapshot }]);
 
+                      // The scripted "Was today's swap right for you?" prompt isn't part of
+                      // historySnapshot (it's rendered separately, not a tracked exchange),
+                      // so the very first reply needs it added explicitly - otherwise the
+                      // classifier has no idea a bare "no" is answering a satisfaction question.
+                      // It must go LAST (right before the customer's reply), not first -
+                      // historySnapshot can already contain earlier, unrelated chat from the
+                      // order-confirmation/substitution screens, and putting the prompt before
+                      // that made it look like the oldest message instead of the most recent
+                      // one, so the classifier read "no" as answering the wrong thing.
+                      const classificationHistory =
+                        feedbackFlow.stage === "awaiting-initial"
+                          ? [...historySnapshot, { speaker: "yacy" as const, text: DELIVERED_FEEDBACK_PROMPT_FALLBACK }]
+                          : historySnapshot;
+
                       const classificationPromise: Promise<FeedbackClassification> = feedbackStageNeedsClassification(feedbackFlow.stage)
-                        ? classifyFeedback(text, historySnapshot)
+                        ? classifyFeedback(text, classificationHistory)
                         : Promise.resolve({ area: null, sentiment: "neutral" });
 
                       void classificationPromise.then((classification) => {
@@ -1596,17 +1690,24 @@ function ServiceConsole({
   reply,
   setReply,
   onSendReply,
+  orderExchanges,
+  chatExchanges,
+  feedbackExchanges,
 }: {
   state: JourneyState;
   onChooseResolution: (choice: string) => void;
   reply: string;
   setReply: (value: string) => void;
   onSendReply: () => void;
+  orderExchanges: ComposerExchange[];
+  chatExchanges: ComposerExchange[];
+  feedbackExchanges: ComposerExchange[];
 }) {
   const inHumanAssistance = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const preference = state.preferences?.product_preferences[0];
   const yacyAlternative = state.inventory?.products.find((product) => product.sku_id === "SKU-YACY-LF-1L");
   const originalProduct = state.inventory?.products.find((product) => product.sku_id === ORIGINAL_SKU);
+  const originalPrice = originalProduct?.unit_price ?? 3.49;
   const meadowStock = state.caseDetails
     ? state.caseDetails.valid_alternatives.reduce((sum, product) => sum + product.available_quantity, 0)
     : state.inventory?.products
@@ -1641,9 +1742,104 @@ function ServiceConsole({
                     {formatTimelineTime(entry.timestamp)} · {entry.message ?? entry.event_type ?? entry.status ?? "Order update"}
                   </span>
                 ))}
+                {/* Chronological: the order-confirmation message and its chat
+                    happen before the out-of-stock case even exists - also
+                    scripted-only in the phone view, so mirrored the same way. */}
+                {state.order && (
+                  <GeneratedChatBubble
+                    speaker="yacy"
+                    kind="ORDER_CONFIRMATION"
+                    context={{
+                      customer_name: state.customer?.customer_name,
+                      order_id: state.order.order_id,
+                      delivery_date: formatDeliveryDate(state.order.delivery_date),
+                      delivery_slot: formatSlot(state.order.delivery_slot),
+                    }}
+                    fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
+                    time="19:31"
+                  />
+                )}
+                {orderExchanges.map((exchange, index) => (
+                  <Fragment key={`console-order-${index}-${exchange.time}`}>
+                    <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+                    {exchange.reply && <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />}
+                  </Fragment>
+                ))}
                 {state.messages.map((message) => message.speaker === "system"
                   ? <span className="event-chip" key={message.id}>{message.text}</span>
                   : <ChatBubble key={message.id} speaker={message.speaker} text={message.text} time={message.time} />)}
+                {/* The phone view renders this same resolution-choice confirmation
+                    inline (not via state.messages), so it's mirrored here too with
+                    the same kind/context - the backend's response cache keeps the
+                    wording identical between the two panels. */}
+                {state.caseDetails?.resolved && state.notification?.responded_resolution_choice && (
+                  <>
+                    <ChatBubble
+                      speaker="maya"
+                      text={state.notification.responded_resolution_choice === "WALLET_CREDIT" ? "Instant Yacy wallet credit" : "Refund to card"}
+                      time={currentTime()}
+                    />
+                    <SequentialChatBubbles
+                      items={[
+                        {
+                          speaker: "marcus",
+                          kind: "HUMAN_ASSISTANCE_CASE_UPDATE",
+                          context: {},
+                          fallback: "Your choice is recorded. I’ve updated the case.",
+                          time: currentTime(),
+                        },
+                        {
+                          speaker: "yacy",
+                          kind: "RESOLUTION_CONFIRMATION",
+                          context: {
+                            resolution_choice: state.notification.responded_resolution_choice,
+                            amount: originalPrice,
+                            currency: "GBP",
+                          },
+                          fallback:
+                            state.notification.responded_resolution_choice === "WALLET_CREDIT"
+                              ? `${formatPrice(originalPrice)} added to your Yacy wallet.`
+                              : `Your ${formatPrice(originalPrice)} card refund is being processed.`,
+                          time: currentTime(),
+                        },
+                      ]}
+                    />
+                  </>
+                )}
+                {/* Mirrors the free-text WhatsApp chat Maya has with the assistant
+                    after the case is handed off - without this, Marcus could only
+                    ever see the scripted case messages, never what Maya actually typed. */}
+                {chatExchanges.map((exchange, index) => (
+                  <Fragment key={`console-chat-${index}-${exchange.time}`}>
+                    <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+                    {exchange.reply && <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />}
+                  </Fragment>
+                ))}
+                {/* Also scripted-only in the phone view, like the resolution block above. */}
+                {state.stage === "delivered" && (
+                  <>
+                    <GeneratedChatBubble
+                      speaker="yacy"
+                      kind="DELIVERED_WITH_SWAP"
+                      context={{}}
+                      fallback="Delivered — including your approved Meadow swap."
+                      time={currentTime()}
+                    />
+                    <GeneratedChatBubble
+                      speaker="yacy"
+                      kind="DELIVERED_FEEDBACK_PROMPT"
+                      context={{}}
+                      fallback={DELIVERED_FEEDBACK_PROMPT_FALLBACK}
+                      time={currentTime()}
+                    />
+                  </>
+                )}
+                {feedbackExchanges.map((exchange, index) => (
+                  <Fragment key={`console-feedback-${index}-${exchange.time}`}>
+                    <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+                    {exchange.reply && <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />}
+                  </Fragment>
+                ))}
               </div>
               <div className="console-compose">
                 <span>Reply</span><span>Note</span><span>Disposition</span>
