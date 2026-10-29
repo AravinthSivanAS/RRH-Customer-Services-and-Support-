@@ -32,7 +32,11 @@ _SYSTEM_PROMPT = (
     "answer. "
     "4) Keep it to 1-3 sentences, no more than ~280 characters. "
     "5) No emoji unless the fallback example uses one. "
-    "6) Reply with the message text only - no quotes, no preamble, no explanation."
+    "6) Reply with the message text only - no quotes, no preamble, no explanation. "
+    "7) If the customer describes something that contradicts a fact given in context (e.g. they say the order "
+    "was never delivered but `delivery_status` is 'delivered', or they blame an item that isn't actually "
+    "missing), do not apologise for or confirm that specific claim as true - state the real fact plainly, "
+    "while still being empathetic about whatever genuinely was an issue."
 )
 
 # Per-kind nudges layered on top of the system prompt above. These steer *how*
@@ -67,19 +71,28 @@ _KIND_GUIDANCE: Dict[str, str] = {
     ),
     "FEEDBACK_ASK_NEXT_AREA_DETAIL": (
         "Acknowledge in a few words what the customer just told you about `acknowledged_area` (their words "
-        "are in `customer_feedback`) - if what they described sounds genuinely bad (damaged, wrong, rotten, "
-        "very late, etc.), that acknowledgement should include a short, sincere apology naming the specific "
-        "thing, not a generic one. Then ask ONE short question for detail about `next_area` specifically - "
-        "same rules as FEEDBACK_ASK_AREA_DETAIL (don't name a specific product unless the customer already "
-        "has, and don't dwell on `acknowledged_area` beyond that one sentence)."
+        "are in `customer_feedback`) - but first check it against the real order facts also in context "
+        "(`delivery_status`, `items`, `resolution_choice`, `substitution_chosen`): if what they said "
+        "contradicts those facts (e.g. they claim it wasn't delivered but `delivery_status` is 'delivered'), "
+        "do not apologise for or confirm that specific claim - acknowledge briefly while stating the real "
+        "fact instead. Otherwise, if what they described sounds genuinely bad (damaged, wrong, rotten, very "
+        "late, etc.) and matches the facts, that acknowledgement should include a short, sincere apology "
+        "naming the specific thing, not a generic one. Then ask ONE short question for detail about "
+        "`next_area` specifically - same rules as FEEDBACK_ASK_AREA_DETAIL (don't name a specific product "
+        "unless the customer already has, and don't dwell on `acknowledged_area` beyond that one sentence)."
     ),
     "FEEDBACK_FINAL_ACK": (
         "The customer has now given detail on every area that was a problem - `details` in context is an "
-        "object keyed by area ('products' and/or 'delivery') with what they said about each. Judge how "
-        "serious what they described is (e.g. rotten/damaged food, a late or missing delivery is serious; a "
-        "minor gripe is not). Write ONE closing message that specifically references what they told you for "
-        "EACH area present in `details` (not a generic line): if what happened was genuinely bad, start with "
-        "a short, sincere apology that names the specific thing that went wrong (not a stock 'sorry for the "
+        "object keyed by area ('products' and/or 'delivery') with what they said about each. First check each "
+        "one against the real order facts also in context (`delivery_status`, `items`, `resolution_choice`, "
+        "`substitution_chosen`): if what the customer described for an area contradicts those facts (e.g. "
+        "they say it was never delivered but `delivery_status` is 'delivered', or they blame an item that "
+        "isn't actually missing per `items`), do not apologise for or confirm that specific claim - state the "
+        "real fact plainly for that area instead. For anything that does match the facts, judge how serious "
+        "it is (e.g. rotten/damaged food, a late or missing delivery is serious; a minor gripe is not). Write "
+        "ONE closing message that specifically references what they told you for EACH area present in "
+        "`details` (not a generic line): if what happened was genuinely bad and fact-checked, start with a "
+        "short, sincere apology that names the specific thing that went wrong (not a stock 'sorry for the "
         "inconvenience' line) before reassuring them it will be looked into; if it was minor, a warm "
         "acknowledgement is enough without over-apologising. No question mark."
     ),
@@ -116,7 +129,11 @@ _CHAT_SYSTEM_PROMPT = (
     "specific acknowledgement that responds to what they actually said, referencing the order "
     "context if it fits naturally (e.g. confirming the delivery is still on track), and only "
     "end with an offer to help further if it feels natural, not as a stock closing line. "
-    "6) No emoji unless the customer used one first."
+    "6) No emoji unless the customer used one first. "
+    "7) If the customer describes something that contradicts a fact given in context (e.g. they say the order "
+    "was never delivered but the facts show it was, or they blame an item that isn't actually missing), do "
+    "not apologise for or confirm that specific claim as true - state the real fact plainly, while still "
+    "being empathetic about whatever genuinely was an issue."
 )
 
 _CHAT_FAILURE_FALLBACK = (
@@ -181,22 +198,15 @@ def generate_message(
     default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
     model = os.environ.get("OPENAI_MODEL", default_model)
     guidance = _KIND_GUIDANCE.get(kind)
-    if kind in _FOLLOWUP_KINDS:
-        example_prompt = (
-            "\nWrite a direct answer to the customer's latest message. "
-            "Do not use a generic acknowledgement."
-        )
-        guidance_prompt = f"\nInstructions for this kind: {guidance}" if guidance else ""
-    else:
-        example_prompt = (
-            f"\nReference example, for length/format only - its tone may be wrong for this specific case, "
-            f"follow the instructions above it instead: {fallback}"
-        )
-        guidance_prompt = (
-            f"\nInstructions for this kind (these override the reference example's tone above): {guidance}"
-            if guidance
-            else ""
-        )
+    example_prompt = (
+        f"\nReference example, for length/format only - its tone may be wrong for this specific case, "
+        f"follow the instructions above it instead: {fallback}"
+    )
+    guidance_prompt = (
+        f"\nInstructions for this kind (these override the reference example's tone above): {guidance}"
+        if guidance
+        else ""
+    )
     user_prompt = (
         f"Message kind: {kind}\n"
         f"Context facts (JSON): {context}"

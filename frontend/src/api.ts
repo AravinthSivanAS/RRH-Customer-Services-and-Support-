@@ -221,7 +221,7 @@ export interface AssistantChatRequest {
   customer_id: string;
   order_id?: string | null;
   message: string;
-  narrative_stage?: "order_placed" | "current";
+  narrative_stage?: "order_placed" | "current" | "delivered";
 }
 
 export interface AssistantChatResponse {

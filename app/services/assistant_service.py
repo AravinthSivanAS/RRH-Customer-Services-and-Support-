@@ -16,7 +16,7 @@ _sessions_lock = threading.Lock()
 
 _MAX_TURNS_KEPT = 20
 
-NarrativeStage = Literal["order_placed", "current"]
+NarrativeStage = Literal["order_placed", "current", "delivered"]
 
 
 def get_session_history(customer_id: str) -> List[Dict[str, str]]:
@@ -61,6 +61,13 @@ def build_grounding_facts(
     - "current": the full live state, including any substitution that has
       taken place and exactly what was offered/chosen - used once the
       out-of-stock conversation has actually started.
+    - "delivered": same as "current", except the order's status is reported
+      as delivered. The mock backend has no endpoint that actually advances
+      an order to DISPATCHED/DELIVERED (the demo's "delivered" screen is a
+      frontend-only narrative beat), so without this override the real
+      order record - still whatever status it was seeded with - would leak
+      through and the assistant would truthfully but wrongly tell the
+      customer their already-delivered order hasn't arrived yet.
     """
     facts: Dict[str, Any] = {}
 
@@ -128,7 +135,7 @@ def build_grounding_facts(
 
     facts["order"] = {
         "order_id": order.order_id,
-        "status": order.status.value,
+        "status": "DELIVERED" if narrative_stage == "delivered" else order.status.value,
         "delivery_date": order.delivery_date,
         "delivery_slot": order.delivery_slot,
         "order_total": order.order_total,

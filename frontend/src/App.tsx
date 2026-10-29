@@ -685,7 +685,7 @@ function useAssistantReply(
   orderId: string | null | undefined,
   message: string,
   fallback: string,
-  narrativeStage: "order_placed" | "current" = "current",
+  narrativeStage: "order_placed" | "current" | "delivered" = "current",
   skip = false,
 ): { text: string; isPending: boolean } {
   const key = `assistant::${customerId}::${orderId ?? ""}::${narrativeStage}::${message}`;
@@ -1425,6 +1425,7 @@ function PhoneExperience({
                     message={exchange.text}
                     fallback={exchange.replyFallback ?? "Thanks for your message! Let us know if there's anything else we can help with."}
                     time={exchange.time}
+                    narrativeStage="delivered"
                     onResolved={(text) => recordExchangeReply(setFeedbackExchanges, index, text)}
                   />
                 ) : (
@@ -1633,7 +1634,7 @@ function AssistantChatBubble({
   message: string;
   fallback: string;
   time: string;
-  narrativeStage?: "order_placed" | "current";
+  narrativeStage?: "order_placed" | "current" | "delivered";
   onResolved?: (text: string) => void;
 }) {
   const { text, isPending } = useAssistantReply(customerId, orderId, message, fallback, narrativeStage);
