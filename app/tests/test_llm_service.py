@@ -48,7 +48,7 @@ def test_order_followup_uses_customer_request_without_generic_fallback_prompt(mo
     assert message == "Your order includes Meadow milk and sourdough bread."
     assert "list the ordered products" in completions.prompts[0]
     assert "Thanks for your message!" not in completions.prompts[0]
-    assert "Write a direct answer to the customer's latest message." in completions.prompts[0]
+    assert "actual product names and quantities" in completions.prompts[0]
 
 
 def test_event_notification_keeps_fallback_reference_prompt(monkeypatch):

@@ -95,8 +95,6 @@ _KIND_GUIDANCE: Dict[str, str] = {
     ),
 }
 
-_FOLLOWUP_KINDS = {"ORDER_CONFIRMATION_FOLLOWUP", "SUBSTITUTION_FOLLOWUP"}
-
 _CHAT_SYSTEM_PROMPT = (
     "You are Yacy's customer support assistant, chatting with a customer over WhatsApp about "
     "their grocery order. Be warm, natural, and conversational - like a helpful human agent, "

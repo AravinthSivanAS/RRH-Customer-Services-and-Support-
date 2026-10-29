@@ -73,30 +73,13 @@ pip install -r requirements.txt
 
 ## Running the server
 
-From the repository root, start FastAPI on its default port:
-
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload
 ```
 
 Swagger UI: http://localhost:8000/docs
 
 Health check: http://localhost:8000/health
-
-## Running the frontend
-
-In a second terminal, from the repository root:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The Vite development proxy forwards `/api` and `/health` to FastAPI at
-`http://127.0.0.1:8000`. Keep the backend running while using the frontend.
-Each frontend startup resets the demo data so a prior run cannot leave the
-short-pick event already processed.
 
 ## Running the tests
 

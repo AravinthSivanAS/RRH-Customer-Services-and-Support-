@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useReducer, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   api,
@@ -708,7 +708,6 @@ export default function App() {
   const [chatExchanges, setChatExchanges] = useState<ComposerExchange[]>([]);
   const [feedbackExchanges, setFeedbackExchanges] = useState<ComposerExchange[]>([]);
   const [feedbackFlow, setFeedbackFlow] = useState<FeedbackFlowState>(initialFeedbackFlow);
-  const initializationStarted = useRef(false);
   const resolved = state.caseDetails?.resolved === true;
   const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
   const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
@@ -721,20 +720,9 @@ export default function App() {
     }
   }, []);
 
-  const initializeDemo = useCallback(async () => {
-    try {
-      await api.resetDemo();
-      dispatch({ type: "loaded", data: await loadDashboard() });
-    } catch (error) {
-      dispatch({ type: "load-error", error: errorDetails(error) });
-    }
-  }, []);
-
   useEffect(() => {
-    if (initializationStarted.current) return;
-    initializationStarted.current = true;
-    void initializeDemo();
-  }, [initializeDemo]);
+    void refreshDashboard();
+  }, [refreshDashboard]);
 
   async function switchScenario(scenario: Scenario) {
     if (scenario === state.scenario || state.mutation) return;
@@ -911,20 +899,7 @@ export default function App() {
                   : "This short pick was already submitted. Restart the scenario to continue."
                 : state.error.message}
           </span>
-          <button
-            onClick={() =>
-              state.error?.status === 409 &&
-              !state.error.message.toLowerCase().includes("stale inventory")
-                ? void restartScenario()
-                : void retry()
-            }
-            disabled={Boolean(state.mutation)}
-          >
-            {state.error.status === 409 &&
-            !state.error.message.toLowerCase().includes("stale inventory")
-              ? "Restart scenario"
-              : "Retry safe reads"}
-          </button>
+          <button onClick={() => void retry()} disabled={Boolean(state.mutation)}>Retry safe reads</button>
         </div>
       )}
 
