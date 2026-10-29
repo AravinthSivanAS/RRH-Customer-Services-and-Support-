@@ -30,6 +30,9 @@ export interface ProductPreferenceUpdate {
   price_increase_limit_percentage?: number;
   preferred_product_name?: string | null;
   notes?: string | null;
+  /** When true, adds a new preference entry instead of replacing any
+   * existing entry for the same product_category. */
+  append?: boolean;
 }
 
 export interface CustomerPreferences {
@@ -92,6 +95,11 @@ export interface OrderSnapshot {
   order_total?: number;
 }
 
+export interface ComparisonPoint {
+  label: string;
+  kind: "match" | "difference";
+}
+
 export interface AlternativeOption {
   sku_id: string;
   product_name: string;
@@ -99,7 +107,7 @@ export interface AlternativeOption {
   unit_price: number;
   available_quantity: number;
   score: number;
-  reasons: string[];
+  comparison_points: ComparisonPoint[];
 }
 
 export interface RejectedAlternative {
@@ -240,6 +248,17 @@ export interface ClassifyFeedbackResponse {
   source: "llm" | "fallback";
 }
 
+export interface ClassifySwapPreferenceRequest {
+  text: string;
+  swapped_product_name: string;
+  original_product_name: string;
+}
+
+export interface ClassifySwapPreferenceResponse {
+  intent: "confirm" | "decline" | "unclear";
+  source: "llm" | "fallback";
+}
+
 export interface SubstitutionSelectionRequest {
   customer_id: string;
   original_sku_id: string;
@@ -329,6 +348,10 @@ export const api = {
     ),
   order: (orderId: string) =>
     request<OrderSnapshot>(`/api/orders/${encodeURIComponent(orderId)}`),
+  orderConfirmationMessage: (orderId: string) =>
+    request<GenerateMessageResponse>(
+      `/api/orders/${encodeURIComponent(orderId)}/confirmation-message`,
+    ),
   substitutionOptions: (orderId: string) =>
     request<SubstitutionCase>(
       `/api/orders/${encodeURIComponent(orderId)}/substitution-options`,
@@ -372,6 +395,11 @@ export const api = {
     }),
   classifyFeedback: (payload: ClassifyFeedbackRequest) =>
     request<ClassifyFeedbackResponse>("/api/messages/classify-feedback", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  classifySwapPreference: (payload: ClassifySwapPreferenceRequest) =>
+    request<ClassifySwapPreferenceResponse>("/api/messages/classify-swap-preference", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

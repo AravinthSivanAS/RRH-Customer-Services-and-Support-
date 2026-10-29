@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,16 @@ class ShortPickEvent(BaseModel):
     picker_id: str
 
 
+class ComparisonPoint(BaseModel):
+    """One at-a-glance fact about how an alternative compares to the
+    out-of-stock original - rendered as a green "match" or amber "difference"
+    badge so the customer can see what's the same and what's not without
+    reading the full product names."""
+
+    label: str
+    kind: Literal["match", "difference"]
+
+
 class AlternativeOption(BaseModel):
     sku_id: str
     product_name: str
@@ -51,7 +61,7 @@ class AlternativeOption(BaseModel):
     unit_price: float
     available_quantity: int
     score: int
-    reasons: List[str]
+    comparison_points: List[ComparisonPoint]
 
 
 class RejectedAlternative(BaseModel):

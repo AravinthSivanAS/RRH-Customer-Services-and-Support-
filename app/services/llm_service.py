@@ -43,6 +43,50 @@ _SYSTEM_PROMPT = (
 # the model should reason about a given message kind without ever dictating
 # the actual wording - the reply itself always comes from the LLM.
 _KIND_GUIDANCE: Dict[str, str] = {
+    "SUBSTITUTION_OFFER": (
+        "Tell the customer `original_product_name` is out of stock today, then mention the alternatives in "
+        "`alternatives` (each has product_name, brand, unit_price) and ask which works best for them. Wrap "
+        "the out-of-stock product name, and the brand name every time it's mentioned, in double asterisks for "
+        "emphasis (e.g. '**Meadow Lactose-Free Milk 1L**', '**Meadow**') - these are the facts the customer "
+        "should notice at a glance; the per-option price/pack details are shown separately below this message "
+        "so don't repeat every alternative's exact spec here. Keep it brief and warm."
+    ),
+    "ORDER_CONFIRMATION": (
+        "Confirm the order for `customer_name` by name, and state the order id `order_id`. `delivery_date` is "
+        "a raw ISO date (e.g. '2026-10-27') and `delivery_slot` is a raw 24-hour time range (e.g. "
+        "'18:00-20:00') - phrase both naturally for a customer message (e.g. 'Tuesday 27 October', 'between "
+        "18:00 and 20:00') without changing the actual date or times they represent. Wrap the order id, the "
+        "phrased delivery date, and the phrased delivery time slot each in double asterisks for emphasis (e.g. "
+        "'**ORD-2026-10001**', '**Tuesday 27 October**', '**between 18:00 and 20:00**') - nothing else in the "
+        "message should be bolded. End with a short, warm reassurance that we'll message them if anything "
+        "changes. One or two sentences."
+    ),
+    "DELIVERED_WITH_SWAP": (
+        "Tell the customer their order has been delivered, including the swap they approved - "
+        "`swapped_product_name` is the item that was substituted in. Wrap that product name in double asterisks "
+        "for emphasis. Then ask ONE short question in the same message: was today's swap right for them? Keep "
+        "it brief and warm, no more than two sentences total."
+    ),
+    "ASSISTANT_SWAP_PREFERENCE_REPLY": (
+        "The customer just typed `customer_message`, about whether `swapped_product_name` should be remembered "
+        "as their go-to whenever `original_product_name` is out of stock. `preference_saved` in context is the "
+        "TRUTH of what actually happened just now - true only if it was genuinely saved, false otherwise (they "
+        "declined, or the message wasn't a clear yes). Reply naturally to what they actually typed, and be "
+        "truthful to `preference_saved` - never say it's saved unless it's true. If true: confirm warmly it's "
+        "saved and will apply automatically next time, wrapping `swapped_product_name` in double asterisks, no "
+        "question needed. If false because they declined: acknowledge warmly that you won't set a default, "
+        "without claiming anything was saved. If false because the message was unrelated or ambiguous: respond "
+        "naturally to what they said and, if it makes sense, ask plainly whether they'd like it remembered. One "
+        "or two sentences."
+    ),
+    "ASSISTANT_FOLLOWUP_CHAT": (
+        "`swapped_product_name` has ALREADY been saved as the customer's go-to for whenever "
+        "`original_product_name` is out of stock, earlier in this same conversation - do not say it's being "
+        "saved, confirm it again, or repeat that confirmation. The customer just typed `customer_message` as a "
+        "casual follow-up (e.g. acknowledging, thanking you, saying ok/cool, or asking something new). Respond "
+        "naturally and warmly to what they actually said, and offer to help with anything else. One short "
+        "sentence, two at most."
+    ),
     # Which stage of the feedback conversation to move to next (sentiment, which
     # area the customer means, when to stop asking) is decided deterministically
     # in the frontend, not inferred by the LLM from raw history - that branching
@@ -344,3 +388,64 @@ def classify_feedback_signal(text: str, history: List[Dict[str, str]]) -> Tuple[
     except Exception:
         logger.exception("Feedback signal classification failed")
         return default, "fallback"
+
+
+_VALID_SWAP_PREFERENCE_INTENTS = {"confirm", "decline", "unclear"}
+
+
+def classify_swap_preference_intent(
+    text: str, swapped_product_name: str, original_product_name: str
+) -> Tuple[Dict[str, Any], str]:
+    """Judges whether a free-text message on the Yacy Assistant screen means
+    the customer wants `swapped_product_name` remembered as their go-to
+    whenever `original_product_name` is out of stock ('confirm'), explicitly
+    does NOT want that ('decline'), or the message doesn't clearly say either
+    way ('unclear', e.g. small talk or an unrelated question). This decides
+    whether the app actually writes the preference to the customer's profile
+    - it must never default to saving on an ambiguous or declining message,
+    so it always degrades to 'unclear' (no save) if the LLM is unavailable or
+    fails, rather than guessing yes.
+    """
+    default = {"intent": "unclear"}
+    client = _get_client()
+    if client is None:
+        return default, "fallback"
+
+    default_model = "gpt-4o" if os.environ.get("OPENAI_BASE_URL") else "gpt-4o-mini"
+    model = os.environ.get("OPENAI_MODEL", default_model)
+    user_prompt = (
+        f"A customer is being asked, in effect, whether they'd like '{swapped_product_name}' remembered as "
+        f"their go-to replacement whenever '{original_product_name}' is out of stock.\n\n"
+        f'They just typed: "{text}"\n\n'
+        "Classify what they mean. Respond with ONLY a JSON object, no other text:\n"
+        '{"intent": "confirm" | "decline" | "unclear"}\n\n'
+        "`confirm`: they want it remembered/kept as the default (e.g. 'yes', 'ok', 'please always use that', "
+        "'sounds good', 'thank you' in response to being told it's been saved). "
+        "`decline`: they explicitly do NOT want it remembered as a default (e.g. 'no', 'don't swap my usual "
+        "preference', 'just this once', 'leave it as it was'). "
+        "`unclear`: anything else - small talk, an unrelated question, or genuinely ambiguous."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You classify short customer-support replies. Reply with strict JSON only - no prose, no markdown fences."},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=20,
+            temperature=0,
+            timeout=6,
+            response_format={"type": "json_object"},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        intent = parsed.get("intent")
+        if intent not in _VALID_SWAP_PREFERENCE_INTENTS:
+            intent = "unclear"
+        return {"intent": intent}, "llm"
+    except Exception:
+        logger.exception("Swap preference intent classification failed")
+        return default, "fallback"
+
+

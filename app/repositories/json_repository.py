@@ -18,8 +18,17 @@ class JsonRepository:
         self._seed: Any = json.loads(self._path.read_text(encoding="utf-8"))
         self.data: Any = copy.deepcopy(self._seed)
 
-    def reset(self) -> None:
+    def save(self) -> None:
+        """Writes the current in-memory state back to the JSON file on disk -
+        only called for repositories where the demo intentionally persists
+        changes (currently just orders), so a real substitution/selection is
+        visible if you open the file while the demo is running."""
+        self._path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def reset(self, persist: bool = False) -> None:
         self.data = copy.deepcopy(self._seed)
+        if persist:
+            self.save()
 
 
 class DataStore:
@@ -44,9 +53,9 @@ class DataStore:
 
     def reset_all(self) -> None:
         with self.lock:
-            self.customers.reset()
+            self.customers.reset(persist=True)
             self.inventory.reset()
-            self.orders.reset()
+            self.orders.reset(persist=True)
             self.events.reset()
             self.notifications.reset()
             self.substitution_cases = {}

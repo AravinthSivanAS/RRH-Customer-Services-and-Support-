@@ -37,9 +37,13 @@ def no_live_llm_calls(monkeypatch):
     def _classify_fallback_only(text, history):
         return {"area": None, "sentiment": "neutral"}, "fallback"
 
+    def _classify_swap_preference_fallback_only(text, swapped_product_name, original_product_name):
+        return {"intent": "unclear"}, "fallback"
+
     monkeypatch.setattr(llm_service, "generate_message", _fallback_only)
     monkeypatch.setattr(llm_service, "generate_chat_reply", _chat_fallback_only)
     monkeypatch.setattr(llm_service, "classify_feedback_signal", _classify_fallback_only)
+    monkeypatch.setattr(llm_service, "classify_swap_preference_intent", _classify_swap_preference_fallback_only)
 
 
 @pytest.fixture

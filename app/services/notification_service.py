@@ -24,7 +24,7 @@ def create_substitution_offer_notification(
     brand = original_product["brand"]
     count_text = "an option" if len(valid_alternatives) == 1 else f"{len(valid_alternatives)} options"
     fallback_message = (
-        f"Your {original_product['product_name']} is out of stock today. "
+        f"Your **{original_product['product_name']}** is out of stock today. "
         f"Here are {count_text} at the same price."
     )
     message, _source = llm_service.generate_message(

@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useReducer, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
   api,
   ApiError,
@@ -37,7 +37,8 @@ type Stage =
   | "delivered-notification"
   | "delivered"
   | "preferences"
-  | "assistant";
+  | "assistant"
+  | "assistant-followup";
 type Mutation = "scenario" | "short-pick" | "response" | "preference" | "restart" | null;
 type Speaker = "maya" | "yacy" | "marcus" | "system";
 
@@ -132,7 +133,7 @@ interface CaseData {
 
 const initialState: JourneyState = {
   scenario: "available",
-  stage: "welcome",
+  stage: "preferences",
   history: [],
   caseDetails: null,
   notification: null,
@@ -261,6 +262,15 @@ async function loadDashboard(): Promise<DashboardData> {
     api.order(ORDER_ID),
   ]);
   if (health.status !== "ok") throw new ApiError("Backend health check failed.", 502);
+
+  // Warm the backend's response cache for the order-confirmation bubble now,
+  // while the customer still has onboarding/preferences/basket screens to get
+  // through - a cold LLM call for this message takes several seconds, so
+  // without this the very first chat bubble sits on a typing indicator far
+  // longer than every later one. Fire-and-forget: the OrderConfirmationBubble
+  // that actually renders it will just find the answer already cached.
+  void api.orderConfirmationMessage(order.order_id).catch(() => undefined);
+
   return { customer, preferences, inventory, order };
 }
 
@@ -326,6 +336,22 @@ function formatDeliveryDate(date: string) {
   return Number.isNaN(parsed.getTime())
     ? date
     : parsed.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
+}
+
+/** Picks a product-appropriate icon from the real inventory category (Milk,
+ * Bakery, Eggs, ...) instead of a generic box for every non-milk item. */
+function basketItemIcon(skuId: string, inventory: InventoryResponse | undefined): string {
+  const category = inventory?.products.find((product) => product.sku_id === skuId)?.category;
+  switch (category) {
+    case "Milk":
+      return "🥛";
+    case "Bakery":
+      return "🍞";
+    case "Eggs":
+      return "🥚";
+    default:
+      return "📦";
+  }
 }
 
 function formatTimelineTime(timestamp: string) {
@@ -442,6 +468,28 @@ async function classifyFeedback(text: string, history: Array<{ speaker: "maya" |
     // eslint-disable-next-line no-console
     console.warn("[yacy-llm] feedback classification failed; treating as neutral/unclear", error);
     return { area: null, sentiment: "neutral" };
+  }
+}
+
+/** Judges whether a free-text message on the Yacy Assistant screen actually
+ * means "yes, remember this swap" - never defaults to "confirm" on failure,
+ * since that would silently save a preference the customer never agreed to. */
+async function classifySwapPreference(
+  text: string,
+  swappedProductName: string,
+  originalProductName: string,
+): Promise<"confirm" | "decline" | "unclear"> {
+  try {
+    const result = await api.classifySwapPreference({
+      text,
+      swapped_product_name: swappedProductName,
+      original_product_name: originalProductName,
+    });
+    return result.intent;
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn("[yacy-llm] swap preference intent classification failed; treating as unclear", error);
+    return "unclear";
   }
 }
 
@@ -677,6 +725,23 @@ function useGeneratedMessage(
   );
 }
 
+/** Order-confirmation wording, framed entirely server-side from the real
+ * order/customer records (see /api/orders/{id}/confirmation-message) -
+ * unlike useGeneratedMessage, the frontend never formats the date/slot or
+ * builds the context itself, it only supplies the order id. */
+function useOrderConfirmationMessage(
+  orderId: string,
+  fallback: string,
+): { text: string; isPending: boolean } {
+  return useAsyncReply(
+    `order-confirmation::${orderId}`,
+    () => api.orderConfirmationMessage(orderId).then((result) => ({ text: result.message, source: result.source })),
+    fallback,
+    false,
+    "ORDER_CONFIRMATION",
+  );
+}
+
 /** Open-ended, memory-aware assistant chat - the backend owns conversation
  * history per customer, so the key only needs the message itself to stay
  * stable forever once sent (no client-side history snapshot required). */
@@ -707,6 +772,7 @@ export default function App() {
   const [orderExchanges, setOrderExchanges] = useState<ComposerExchange[]>([]);
   const [chatExchanges, setChatExchanges] = useState<ComposerExchange[]>([]);
   const [feedbackExchanges, setFeedbackExchanges] = useState<ComposerExchange[]>([]);
+  const [assistantFollowupExchanges, setAssistantFollowupExchanges] = useState<ComposerExchange[]>([]);
   const [feedbackFlow, setFeedbackFlow] = useState<FeedbackFlowState>(initialFeedbackFlow);
   const resolved = state.caseDetails?.resolved === true;
   const showMarcus = state.caseDetails?.outcome === "HUMAN_ASSISTANCE_REQUIRED";
@@ -735,6 +801,7 @@ export default function App() {
       setOrderExchanges([]);
       setChatExchanges([]);
       setFeedbackExchanges([]);
+      setAssistantFollowupExchanges([]);
       setFeedbackFlow(initialFeedbackFlow);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
@@ -752,6 +819,7 @@ export default function App() {
       setOrderExchanges([]);
       setChatExchanges([]);
       setFeedbackExchanges([]);
+      setAssistantFollowupExchanges([]);
       setFeedbackFlow(initialFeedbackFlow);
     } catch (error) {
       dispatch({ type: "set-error", error: errorDetails(error) });
@@ -838,6 +906,30 @@ export default function App() {
     }
   }
 
+  /** Called when the customer says yes to "keep this swap as your go-to for
+   * next time?" after delivery - updates the saved preference to the swapped
+   * product so future substitutions go straight to it, and persists to the
+   * customer record on the backend (customer_360.json). */
+  async function keepSwapAsPreference(skuId: string, brand: string, productName: string, originalProductName: string) {
+    const preference = state.preferences?.product_preferences[0];
+    if (!preference) return;
+    const conditionalRule = `Only substitute with this when ${originalProductName} is out of stock`;
+    try {
+      const preferences = await api.savePreference(CUSTOMER_ID, {
+        product_category: preference.product_category,
+        preferred_brand: brand,
+        preferred_sku_id: skuId,
+        substitution_rule: conditionalRule,
+        preferred_product_name: productName,
+        notes: conditionalRule,
+        append: true,
+      });
+      dispatch({ type: "preference-complete", preferences, continueToBasket: false });
+    } catch (error) {
+      dispatch({ type: "set-error", error: errorDetails(error) });
+    }
+  }
+
   function sendMarcusReply() {
     const message = reply.trim();
     if (!message || resolved) return;
@@ -911,11 +1003,11 @@ export default function App() {
           <div className="phone-frame">
             <div className="phone-screen">
               <div className="phone-notch" />
-              <div className="phone-status"><strong>{state.stage === "tracking" ? "17:30" : state.stage === "delivered" ? "18:40" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "welcome" ? "19:11" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
+              <div className="phone-status"><strong>{state.stage === "tracking" || state.stage === "delivery-notification" ? "17:30" : state.stage === "delivered" ? "18:40" : state.stage === "delivered-notification" ? "18:42" : state.stage === "assistant-followup" ? "18:45" : state.stage === "basket" ? "19:30" : state.stage === "order-confirmation" ? "19:31" : state.stage === "welcome" ? "19:11" : state.stage === "preferences" ? "19:12" : "06:46"}</strong><span>▮▮▮ ◉ ▱</span></div>
 
               {state.stage === "welcome" && (
                 <div className="welcome-screen">
-                  <div className="welcome-date">Tuesday</div>
+                  <div className="welcome-date">Sunday</div>
                   <div className="welcome-time">19:11</div>
                   <button className="push-notification welcome-notification" onClick={() => navigate("preferences")}>
                     <Logo compact />
@@ -942,15 +1034,27 @@ export default function App() {
                 <div className="lock-screen">
                   <div className="lock-date">Tuesday</div>
                   <div className="lock-time">18:42</div>
-                  <button className="push-notification" onClick={() => navigate("delivered")}>
+                  <button className="push-notification" onClick={() => navigate("assistant-followup")}>
                     <Logo compact />
-                    <span><strong>WhatsApp · Yacy</strong><small>Your order has been delivered. Tap to see details.</small></span>
+                    <span><strong>Yacy</strong><small>Your order has been delivered. Tap to see details.</small></span>
                     <time>now</time>
                   </button>
                 </div>
               )}
 
-              {state.stage !== "lock" && state.stage !== "welcome" && state.stage !== "delivered-notification" && (
+              {state.stage === "delivery-notification" && (
+                <div className="lock-screen">
+                  <div className="lock-date">Tuesday</div>
+                  <div className="lock-time">17:30</div>
+                  <button className="push-notification" onClick={() => navigate("tracking")}>
+                    <Logo compact />
+                    <span><strong>Yacy</strong><small>Your order is out for delivery — arriving about 18:40. Track live.</small></span>
+                    <time>now</time>
+                  </button>
+                </div>
+              )}
+
+              {state.stage !== "lock" && state.stage !== "welcome" && state.stage !== "delivered-notification" && state.stage !== "delivery-notification" && (
                 <PhoneExperience
                   state={state}
                   originalPrice={originalItem?.unit_price ?? 3.49}
@@ -959,6 +1063,7 @@ export default function App() {
                   onChooseResolution={(choice) => void chooseResolution(choice)}
                   onNavigate={navigate}
                   onSavePreference={() => void savePreference()}
+                  onKeepSwapPreference={(skuId, brand, productName, originalProductName) => keepSwapAsPreference(skuId, brand, productName, originalProductName)}
                   orderExchanges={orderExchanges}
                   setOrderExchanges={setOrderExchanges}
                   chatExchanges={chatExchanges}
@@ -967,6 +1072,8 @@ export default function App() {
                   setFeedbackExchanges={setFeedbackExchanges}
                   feedbackFlow={feedbackFlow}
                   setFeedbackFlow={setFeedbackFlow}
+                  assistantFollowupExchanges={assistantFollowupExchanges}
+                  setAssistantFollowupExchanges={setAssistantFollowupExchanges}
                 />
               )}
             </div>
@@ -977,6 +1084,11 @@ export default function App() {
             )}
             {state.stage === "confirmation" && chatExchanges.length > 0 && (
               <button className="continue-outside-phone" aria-label="Continue" onClick={() => navigate("delivery-notification")}>
+                →
+              </button>
+            )}
+            {state.stage === "assistant-followup" && (
+              <button className="continue-outside-phone" aria-label="Continue to WhatsApp" onClick={() => navigate("delivered")}>
                 →
               </button>
             )}
@@ -1014,6 +1126,7 @@ function PhoneExperience({
   onChooseResolution,
   onNavigate,
   onSavePreference,
+  onKeepSwapPreference,
   orderExchanges,
   setOrderExchanges,
   chatExchanges,
@@ -1022,6 +1135,8 @@ function PhoneExperience({
   setFeedbackExchanges,
   feedbackFlow,
   setFeedbackFlow,
+  assistantFollowupExchanges,
+  setAssistantFollowupExchanges,
 }: {
   state: JourneyState;
   originalPrice: number;
@@ -1030,6 +1145,7 @@ function PhoneExperience({
   onChooseResolution: (choice: string) => void;
   onNavigate: (stage: Stage) => void;
   onSavePreference: () => void;
+  onKeepSwapPreference: (skuId: string, brand: string, productName: string, originalProductName: string) => void;
   orderExchanges: ComposerExchange[];
   setOrderExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
   chatExchanges: ComposerExchange[];
@@ -1038,12 +1154,20 @@ function PhoneExperience({
   setFeedbackExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
   feedbackFlow: FeedbackFlowState;
   setFeedbackFlow: Dispatch<SetStateAction<FeedbackFlowState>>;
+  assistantFollowupExchanges: ComposerExchange[];
+  setAssistantFollowupExchanges: Dispatch<SetStateAction<ComposerExchange[]>>;
 }) {
   useEffect(() => {
     if (state.stage !== "tracking") return;
     const timer = setTimeout(() => onNavigate("delivered-notification"), 3000);
     return () => clearTimeout(timer);
   }, [state.stage, onNavigate]);
+
+  const hasSwap = Boolean(state.notification?.responded_sku_id);
+  const swappedItem = state.order?.items.find((item) => item.sku_id === state.notification?.responded_sku_id);
+  const swappedProduct = state.inventory?.products.find((product) => product.sku_id === state.notification?.responded_sku_id);
+  const swappedProductName = swappedItem?.product_name ?? swappedProduct?.product_name ?? "your approved swap";
+  const swappedBrand = swappedProduct?.brand ?? "Meadow";
 
   if (state.stage === "basket" && state.order) {
     const order = state.order;
@@ -1055,7 +1179,7 @@ function PhoneExperience({
             const isPreferredItem = item.sku_id === ORIGINAL_SKU;
             return (
               <article className={`basket-item${isPreferredItem ? " basket-item--preferred" : ""}`} key={item.sku_id}>
-                <span className="item-icon">{isPreferredItem ? "🥛" : "📦"}</span>
+                <span className="item-icon">{basketItemIcon(item.sku_id, state.inventory)}</span>
                 <div className="basket-item-details">
                   <strong>{item.product_name}</strong>
                   <small>{isPreferredItem ? `${state.preferences?.product_preferences[0]?.preferred_brand} · preferred item` : `Quantity ${item.quantity}`}</small>
@@ -1077,18 +1201,11 @@ function PhoneExperience({
     );
   }
 
-  if (state.stage === "tracking" || state.stage === "delivery-notification") {
+  if (state.stage === "tracking") {
     return (
       <div className="phone-app tracking-app">
-        <div className="phone-appbar"><button onClick={onBack} aria-label="Back">‹</button><Logo compact /><strong>{state.stage === "tracking" ? "Track your order" : "Yacy"}</strong></div>
-        {state.stage === "delivery-notification" ? (
-          <div className="notification-screen">
-            <button className="push-notification push-notification--light" onClick={() => onNavigate("tracking")}>
-              <Logo compact /><span><strong>Yacy</strong><small>Your order is out for delivery — arriving about 18:40. Track live.</small></span><time>17:30</time>
-            </button>
-          </div>
-        ) : (
-          <div className="tracking-body">
+        <div className="phone-appbar"><button onClick={onBack} aria-label="Back">‹</button><Logo compact /><strong>Track your order</strong></div>
+        <div className="tracking-body">
             <div className="fictional-map">
               <svg className="map-canvas" viewBox="0 0 260 190" preserveAspectRatio="none" aria-hidden="true">
                 <rect x="0" y="0" width="260" height="190" fill="#eef1ea" />
@@ -1100,15 +1217,19 @@ function PhoneExperience({
                 <path className="map-road-line map-road-line--minor" d="M-10 64 L270 48" />
                 <path className="map-road-line" d="M34 -10 L10 200" />
                 <path className="map-road-line map-road-line--route-road" d="M-10 150 L270 150" />
+                <path className="map-road-line map-road-line--route-road" d="M65 -10 L65 200" />
+                <path className="map-road-line map-road-line--route-road" d="M-10 80 L270 80" />
                 <path className="map-road-line map-road-line--route-road" d="M217 -10 L217 200" />
                 <text className="map-street-label" x="110" y="144">Leeds Rd</text>
                 <text className="map-street-label" x="150" y="40">Mill Ln</text>
-                {/* Follows the roads above (right along Leeds Rd, then up the cross
-                    street to Home) instead of cutting a straight line through the
-                    blocks - dash pattern + round caps renders as discrete dots. */}
+                {/* A real turn-by-turn route, not a straight cut through the blocks:
+                    right along Leeds Rd, up the first cross street, right along the
+                    next road, then up the final cross street to Home - every bend
+                    lands on a road drawn above, not in open space. Dash pattern +
+                    round caps renders as discrete dots. */}
                 <path
                   id="delivery-route"
-                  d="M43 150 L217 150 L217 36"
+                  d="M43 150 L65 150 L65 80 L217 80 L217 36"
                   fill="none"
                   stroke="#18864b"
                   strokeWidth="6"
@@ -1147,7 +1268,6 @@ function PhoneExperience({
               <div className="tracked-item" key={item.sku_id}><span>🥛</span><div><strong>{item.product_name}</strong><small>Approved substitution</small></div></div>
             ))}
           </div>
-        )}
       </div>
     );
   }
@@ -1207,6 +1327,106 @@ function PhoneExperience({
     );
   }
 
+  if (state.stage === "assistant-followup") {
+    const originalItem = state.order?.items.find((item) => item.sku_id === ORIGINAL_SKU);
+    const originalProductName = originalItem?.product_name ?? "your usual item";
+    const preferenceSaved =
+      state.preferences?.product_preferences[0]?.preferred_sku_id === state.notification?.responded_sku_id;
+    return (
+      <div className="phone-app assistant-app">
+        <div className="phone-appbar"><button onClick={onBack} aria-label="Back">‹</button><Logo compact /><div><strong>Yacy Assistant</strong><small>Virtual agent · usually replies instantly</small></div></div>
+        <div className="assistant-messages">
+          {assistantFollowupExchanges.map((exchange, index) => (
+            <Fragment key={`assistant-followup-${index}`}>
+              <ChatBubble speaker="maya" text={exchange.text} time={exchange.time} />
+              {exchange.reply ? (
+                <ChatBubble speaker="yacy" text={exchange.reply} time={exchange.time} />
+              ) : !exchange.replyKind ? (
+                // Classifying whether this actually means "yes, remember it" before
+                // we even know what the reply should truthfully say - see
+                // classifySwapPreference.
+                <TypingBubble speaker="yacy" />
+              ) : (
+                <GeneratedChatBubble
+                  speaker="yacy"
+                  kind={exchange.replyKind}
+                  context={exchange.replyContext ?? {}}
+                  fallback={exchange.replyFallback ?? "Got it, thanks for letting me know!"}
+                  time={exchange.time}
+                  onResolved={(replyText) => {
+                    recordExchangeReply(setAssistantFollowupExchanges, index, replyText);
+                    if (exchange.replyContext?.preference_saved) {
+                      const swappedSkuId = state.notification?.responded_sku_id;
+                      if (swappedSkuId) onKeepSwapPreference(swappedSkuId, swappedBrand, swappedProductName, originalProductName);
+                    }
+                  }}
+                />
+              )}
+            </Fragment>
+          ))}
+          {preferenceSaved && <span className="saved-chip">✓ Preferences updated</span>}
+        </div>
+        <PhoneComposer
+          placeholder="Ask Yacy to remember a preference…"
+          onSend={(text) => {
+            const index = assistantFollowupExchanges.length;
+            setAssistantFollowupExchanges((prev) => [...prev, { text, time: "18:45", history: [] }]);
+
+            // Once this swap is already saved, every later message is just
+            // casual follow-up, not another yes/no to classify - otherwise an
+            // "ok"/"cool" afterward keeps re-triggering "I've saved X..." and
+            // re-appending the same preference.
+            if (preferenceSaved) {
+              setAssistantFollowupExchanges((prev) =>
+                prev.map((exchange, i) =>
+                  i === index
+                    ? {
+                        ...exchange,
+                        replyKind: "ASSISTANT_FOLLOWUP_CHAT",
+                        replyContext: {
+                          customer_message: text,
+                          original_product_name: originalProductName,
+                          swapped_product_name: swappedProductName,
+                        },
+                        replyFallback: "You're welcome! Let me know if there's anything else I can help with.",
+                      }
+                    : exchange,
+                ),
+              );
+              return;
+            }
+
+            void classifySwapPreference(text, swappedProductName, originalProductName).then((intent) => {
+              const preferenceWillBeSaved = intent === "confirm";
+              setAssistantFollowupExchanges((prev) =>
+                prev.map((exchange, i) =>
+                  i === index
+                    ? {
+                        ...exchange,
+                        replyKind: "ASSISTANT_SWAP_PREFERENCE_REPLY",
+                        replyContext: {
+                          customer_message: text,
+                          original_product_name: originalProductName,
+                          swapped_product_name: swappedProductName,
+                          preference_saved: preferenceWillBeSaved,
+                        },
+                        replyFallback:
+                          intent === "confirm"
+                            ? `Of course! I’ve saved **${swappedProductName}** as your go-to whenever ${originalProductName} is out of stock — it’ll apply automatically to every future order.`
+                            : intent === "decline"
+                              ? `No problem, I won’t set **${swappedProductName}** as a default - I’ll check with you each time instead.`
+                              : `Just to check - would you like me to remember **${swappedProductName}** as your go-to whenever ${originalProductName} is out of stock?`,
+                      }
+                    : exchange,
+                ),
+              );
+            });
+          }}
+        />
+      </div>
+    );
+  }
+
   const order = state.order;
   const messages = state.messages;
   const isChatOrConfirmation =
@@ -1224,16 +1444,9 @@ function PhoneExperience({
         <div className="day-stamp">TODAY</div>
         {order && (
           <>
-            <GeneratedChatBubble
-              speaker="yacy"
-              kind="ORDER_CONFIRMATION"
-              context={{
-                customer_name: state.customer?.customer_name,
-                order_id: order.order_id,
-                delivery_date: formatDeliveryDate(order.delivery_date),
-                delivery_slot: formatSlot(order.delivery_slot),
-              }}
-              fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${order.order_id} is confirmed for ${formatDeliveryDate(order.delivery_date)}, ${formatSlot(order.delivery_slot)}. We’ll message you here if anything changes.`}
+            <OrderConfirmationBubble
+              orderId={order.order_id}
+              fallback={`Hi ${state.customer?.customer_name} 👋 Your order **${order.order_id}** is confirmed for **${formatDeliveryDate(order.delivery_date)}**, **${formatSlot(order.delivery_slot)}**. We’ll message you here if anything changes.`}
               time="19:31"
             />
             {orderExchanges.map((exchange, index) => (
@@ -1263,12 +1476,24 @@ function PhoneExperience({
         ))}
         {showOptions && (
           <div className="message-card">
-            <p>Here are two Meadow options at the same price:</p>
+            <p>
+              Here {state.caseDetails?.valid_alternatives.length === 1 ? "is" : "are"}{" "}
+              <strong>{state.caseDetails?.valid_alternatives.length}</strong>{" "}
+              {state.caseDetails?.valid_alternatives.length === 1 ? "option" : "options"}:
+            </p>
             {state.caseDetails?.valid_alternatives.map((option, index) => (
               <div className="chat-option" key={option.sku_id}>
-                <span className="milk-pack">M<br /><small>LF</small></span>
+                <span className="milk-pack">
+                  <MilkCartonIcon />
+                </span>
                 <div><b>OPTION {index + 1}</b><strong>{option.product_name}</strong><small>{option.brand} · {formatPrice(option.unit_price)}</small></div>
-                <span className="option-check">✓ Same brand</span>
+                <div className="option-badges">
+                  {option.comparison_points.map((point, pointIndex) => (
+                    <span key={pointIndex} className={`option-check option-check--${point.kind}`}>
+                      {point.kind === "match" ? "✓" : "≠"} {point.label}
+                    </span>
+                  ))}
+                </div>
               </div>
             ))}
             <span className="message-time">06:46</span>
@@ -1312,7 +1537,7 @@ function PhoneExperience({
                 (option) => option.sku_id === state.notification?.responded_sku_id,
               ) ?? -1) + 1
             }`}
-            time={currentTime()}
+            time="06:51"
           />
         )}
         {state.caseDetails?.resolved && state.notification?.responded_resolution_choice && (
@@ -1323,7 +1548,7 @@ function PhoneExperience({
                 ? "Instant Yacy wallet credit"
                 : "Refund to card"
             }
-            time={currentTime()}
+            time="06:51"
           />
         )}
         {confirmationUpdatesVisible && (() => {
@@ -1339,7 +1564,7 @@ function PhoneExperience({
               fallback: assistance
                 ? "Your choice is recorded. I’ve updated the case."
                 : "Great choice. Updating your order now…",
-              time: currentTime(),
+              time: "06:51",
             },
           ];
 
@@ -1349,7 +1574,7 @@ function PhoneExperience({
               kind: "SWAP_ADDED_CONFIRMATION",
               context: { product_name: swappedProductName },
               fallback: `${swappedProductName} is added to your order.`,
-              time: currentTime(),
+              time: "06:51",
             });
           }
 
@@ -1366,7 +1591,7 @@ function PhoneExperience({
                 state.notification.responded_resolution_choice === "WALLET_CREDIT"
                   ? `${formatPrice(originalPrice)} added to your Yacy wallet.`
                   : `Your ${formatPrice(originalPrice)} card refund is being processed.`,
-              time: currentTime(),
+              time: "06:51",
             });
           }
 
@@ -1396,17 +1621,26 @@ function PhoneExperience({
                 {
                   speaker: "yacy",
                   kind: "DELIVERED_WITH_SWAP",
-                  context: {},
-                  fallback: "Delivered — including your approved Meadow swap.",
+                  context: hasSwap ? { swapped_product_name: swappedProductName } : {},
+                  fallback: hasSwap
+                    ? `Your order has been delivered — including your approved swap (**${swappedProductName}**). Was today's swap right for you?`
+                    : "Delivered — including your approved Meadow swap.",
                   time: "18:40",
                 },
-                {
-                  speaker: "yacy",
-                  kind: "DELIVERED_FEEDBACK_PROMPT",
-                  context: {},
-                  fallback: DELIVERED_FEEDBACK_PROMPT_FALLBACK,
-                  time: "18:40",
-                },
+                // The delivery-feedback question is folded straight into the
+                // message above when there's a real swap - keeping this as a
+                // separate bubble when there's no swap, same as before.
+                ...(hasSwap
+                  ? []
+                  : [
+                      {
+                        speaker: "yacy" as const,
+                        kind: "DELIVERED_FEEDBACK_PROMPT",
+                        context: {},
+                        fallback: DELIVERED_FEEDBACK_PROMPT_FALLBACK,
+                        time: "18:40",
+                      },
+                    ]),
               ]}
             />
             {feedbackExchanges.map((exchange, index) => (
@@ -1454,7 +1688,7 @@ function PhoneExperience({
             state.stage === "order-confirmation"
               ? (text) => setOrderExchanges((prev) => [...prev, { text, time: currentTime(), history: [] }])
               : showConfirmation
-                ? (text) => setChatExchanges((prev) => [...prev, { text, time: currentTime(), history: [] }])
+                ? (text) => setChatExchanges((prev) => [...prev, { text, time: "06:51", history: [] }])
                 : state.stage === "delivered"
                   ? (text) => {
                       // Appended immediately (no replyKind yet) so the customer's own
@@ -1517,11 +1751,13 @@ function PhoneComposer({
   onAssistant,
   onSend,
   disabled,
+  placeholder = "Message",
 }: {
   onSettings?: () => void;
   onAssistant?: () => void;
   onSend?: (text: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }) {
   const [value, setValue] = useState("");
 
@@ -1536,7 +1772,7 @@ function PhoneComposer({
       {onAssistant && <button aria-label="Open Yacy Assistant" onClick={onAssistant}>✦</button>}
       <input
         aria-label="Message"
-        placeholder="Message"
+        placeholder={placeholder}
         value={value}
         disabled={disabled}
         onChange={(event) => setValue(event.target.value)}
@@ -1557,12 +1793,44 @@ function PhoneComposer({
   );
 }
 
+/** A simple gable-top carton glyph for substitution option cards, standing
+ * in for the actual product photo we don't have in this mock catalogue. */
+function MilkCartonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="18" aria-hidden="true">
+      <path
+        d="M7 4.5 12 2l5 2.5V20a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1z"
+        fill="white"
+        fillOpacity="0.16"
+        stroke="white"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path d="M7 9h10" stroke="white" strokeWidth="1.2" />
+      <path d="M12 2v2.5" stroke="white" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+/** Renders `**text**` markdown-style bold spans as <strong> - the LLM wraps
+ * specific facts (order id, dates, amounts) this way when asked to, so the
+ * customer can scan a message for the parts that actually matter. */
+function renderWithBold(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**") ? (
+      <strong key={index}>{part.slice(2, -2)}</strong>
+    ) : (
+      <Fragment key={index}>{part}</Fragment>
+    ),
+  );
+}
+
 function ChatBubble({ speaker, text, time }: { speaker: Speaker; text: string; time: string }) {
   const outgoing = speaker === "maya";
   return (
     <div className={`chat-bubble ${outgoing ? "chat-bubble--outgoing" : ""} ${speaker === "marcus" ? "chat-bubble--marcus" : ""}`}>
       {speaker === "marcus" && <strong className="bubble-author">MARCUS</strong>}
-      <p>{text}</p><span className="message-time">{time}{outgoing ? " ✓✓" : ""}</span>
+      <p>{renderWithBold(text)}</p><span className="message-time">{time}{outgoing ? " ✓✓" : ""}</span>
     </div>
   );
 }
@@ -1618,6 +1886,24 @@ function GeneratedChatBubble({
 
   if (isPending) return <TypingBubble speaker={speaker} />;
   return <ChatBubble speaker={speaker} text={text} time={time} />;
+}
+
+/** Like GeneratedChatBubble, but for the order-confirmation message
+ * specifically - backed by useOrderConfirmationMessage so the wording comes
+ * from the real order/customer records, not frontend-assembled context. */
+function OrderConfirmationBubble({
+  orderId,
+  fallback,
+  time,
+}: {
+  orderId: string;
+  fallback: string;
+  time: string;
+}) {
+  const { text, isPending } = useOrderConfirmationMessage(orderId, fallback);
+
+  if (isPending) return <TypingBubble speaker="yacy" />;
+  return <ChatBubble speaker="yacy" text={text} time={time} />;
 }
 
 function AssistantChatBubble({
@@ -1749,16 +2035,9 @@ function ServiceConsole({
                     happen before the out-of-stock case even exists - also
                     scripted-only in the phone view, so mirrored the same way. */}
                 {state.order && (
-                  <GeneratedChatBubble
-                    speaker="yacy"
-                    kind="ORDER_CONFIRMATION"
-                    context={{
-                      customer_name: state.customer?.customer_name,
-                      order_id: state.order.order_id,
-                      delivery_date: formatDeliveryDate(state.order.delivery_date),
-                      delivery_slot: formatSlot(state.order.delivery_slot),
-                    }}
-                    fallback={`Hi ${state.customer?.customer_name} 👋 Your order ${state.order.order_id} is confirmed for ${formatDeliveryDate(state.order.delivery_date)}, ${formatSlot(state.order.delivery_slot)}. We’ll message you here if anything changes.`}
+                  <OrderConfirmationBubble
+                    orderId={state.order.order_id}
+                    fallback={`Hi ${state.customer?.customer_name} 👋 Your order **${state.order.order_id}** is confirmed for **${formatDeliveryDate(state.order.delivery_date)}**, **${formatSlot(state.order.delivery_slot)}**. We’ll message you here if anything changes.`}
                     time="19:31"
                   />
                 )}

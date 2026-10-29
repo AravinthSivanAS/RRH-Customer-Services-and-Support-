@@ -71,13 +71,14 @@ def short_pick(event: ShortPickEvent) -> Dict[str, Any]:
         data_store.processed_short_picks.add(dedup_key)
 
     preference = preference_service.find_product_preference(customer, event.sku_id)
-    rule_applied = preference.substitution_rule.value if preference else "NONE"
+    rule_applied = preference.substitution_rule if preference else "NONE"
 
     valid_alternatives, rejected_alternatives = next_best_action_service.rank_alternatives(
         original_product, preference, event.store_id
     )
 
     active_item["item_status"] = "OUT_OF_STOCK"
+    data_store.orders.save()
 
     event_record = audit_service.record_event(
         EventType.SHORT_PICK_RECORDED,

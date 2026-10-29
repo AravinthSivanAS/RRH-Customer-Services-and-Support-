@@ -43,19 +43,36 @@ def upsert_product_preference(
         "preferred_product_name": preferred_product_name,
         "preferred_brand": update.preferred_brand,
         "preferred_sku_id": update.preferred_sku_id,
-        "substitution_rule": update.substitution_rule.value,
+        "substitution_rule": update.substitution_rule,
         "price_increase_limit_percentage": update.price_increase_limit_percentage,
         "notes": update.notes,
     }
 
     with data_store.lock:
-        replaced = False
-        for i, pref in enumerate(prefs):
-            if pref["product_category"] == update.product_category:
-                prefs[i] = new_entry
-                replaced = True
-                break
-        if not replaced:
-            prefs.append(new_entry)
+        if update.append:
+            # A swap-specific fallback preference (e.g. "use the 6-pack
+            # whenever the 1L is out of stock") - always a new entry, never
+            # overwrites the customer's general preference for this category.
+            # Guarded against duplicates: the caller may legitimately call
+            # this more than once for the same swap (e.g. a retried request),
+            # and this must never pile up repeated identical entries.
+            already_present = any(
+                pref["product_category"] == update.product_category
+                and pref["preferred_sku_id"] == update.preferred_sku_id
+                for pref in prefs
+            )
+            if not already_present:
+                prefs.append(new_entry)
+        else:
+            replaced = False
+            for i, pref in enumerate(prefs):
+                if pref["product_category"] == update.product_category:
+                    prefs[i] = new_entry
+                    replaced = True
+                    break
+            if not replaced:
+                prefs.append(new_entry)
+
+        data_store.customers.save()
 
     return CustomerPreferences.model_validate(raw["preferences"])

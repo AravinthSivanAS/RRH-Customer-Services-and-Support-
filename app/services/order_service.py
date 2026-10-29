@@ -140,6 +140,7 @@ def resolve_customer_selection(
         apply_substitution(
             order, original_sku_id, selected_product, quantity, reason, actor_type.value
         )
+        data_store.orders.save()
         case["resolved"] = True
 
         notification_service.mark_responded(notification_id, selected_sku_id=selected_sku_id)

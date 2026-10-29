@@ -38,7 +38,12 @@ class ProductPreference(BaseModel):
     preferred_product_name: str
     preferred_brand: str
     preferred_sku_id: str
-    substitution_rule: SubstitutionRule
+    # A plain string rather than the SubstitutionRule enum - a preference
+    # entry can describe a conditional rule scoped to a specific original
+    # product (e.g. "Only substitute with this when <product> is out of
+    # stock"), which isn't one of the fixed enum values. The enum still
+    # exists for the one fixed rule (SAME_BRAND_OR_ASK) used elsewhere.
+    substitution_rule: str
     price_increase_limit_percentage: float = 0
     notes: Optional[str] = None
 
@@ -99,7 +104,13 @@ class ProductPreferenceUpdateRequest(BaseModel):
     product_category: str
     preferred_brand: str
     preferred_sku_id: str
-    substitution_rule: SubstitutionRule
+    substitution_rule: str
     price_increase_limit_percentage: float = 0
     preferred_product_name: Optional[str] = None
     notes: Optional[str] = None
+    # When true, this is added as a new, separate preference entry rather
+    # than replacing any existing entry for the same product_category - used
+    # for a swap-specific fallback preference (e.g. "use the 6-pack whenever
+    # the 1L is out of stock") that must not overwrite the customer's general
+    # preference for that category.
+    append: bool = False

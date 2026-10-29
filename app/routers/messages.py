@@ -84,3 +84,26 @@ def classify_feedback(request: ClassifyFeedbackRequest) -> ClassifyFeedbackRespo
     see llm_service.classify_feedback_signal."""
     result, source = llm_service.classify_feedback_signal(request.text, request.history)
     return ClassifyFeedbackResponse(area=result["area"], sentiment=result["sentiment"], source=source)
+
+
+class ClassifySwapPreferenceRequest(BaseModel):
+    text: str
+    swapped_product_name: str
+    original_product_name: str
+
+
+class ClassifySwapPreferenceResponse(BaseModel):
+    intent: Literal["confirm", "decline", "unclear"]
+    source: str
+
+
+@router.post("/classify-swap-preference", response_model=ClassifySwapPreferenceResponse)
+def classify_swap_preference(request: ClassifySwapPreferenceRequest) -> ClassifySwapPreferenceResponse:
+    """Decides whether a free-text message on the Yacy Assistant screen means
+    the customer wants this swap remembered as their default - see
+    llm_service.classify_swap_preference_intent. The caller must only write
+    the preference to the customer's profile when this returns 'confirm'."""
+    result, source = llm_service.classify_swap_preference_intent(
+        request.text, request.swapped_product_name, request.original_product_name
+    )
+    return ClassifySwapPreferenceResponse(intent=result["intent"], source=source)

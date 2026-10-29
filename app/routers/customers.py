@@ -38,7 +38,7 @@ def save_customer_preference(
         decision_outcome=DecisionOutcome.PREFERENCE_UPDATED,
         actor_type=ActorType.CUSTOMER,
         original_sku=update.preferred_sku_id,
-        rule_applied=update.substitution_rule.value,
+        rule_applied=update.substitution_rule,
     )
 
     return preferences

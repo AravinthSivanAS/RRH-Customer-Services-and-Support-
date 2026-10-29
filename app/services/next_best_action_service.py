@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.customer import ProductPreference
-from app.models.event import AlternativeOption, RejectedAlternative
+from app.models.event import AlternativeOption, ComparisonPoint, RejectedAlternative
 from app.repositories.json_repository import data_store
 from app.services import exception_detection_service, inventory_service
 
@@ -40,6 +40,54 @@ def _package_similarity_score(original_name: str, candidate_name: str) -> Tuple[
 
 def _quantity_score(available_quantity: int) -> int:
     return max(0, min(available_quantity, 20))
+
+
+def _extract_pack_descriptor(product_name: str) -> Optional[str]:
+    """Pulls the exact pack-size text out of a product name (e.g. '6 x 200ml',
+    '1L', '2L') so it can be shown to the customer verbatim and compared
+    between the original and a candidate."""
+    for pattern in (_VOLUME_PACK_RE, _VOLUME_ML_RE, _VOLUME_L_RE):
+        match = pattern.search(product_name)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _comparison_points(original_product: Dict[str, Any], candidate: Dict[str, Any]) -> List[ComparisonPoint]:
+    """At-a-glance facts about how `candidate` compares to the out-of-stock
+    original - every alternative only ever offers a same-brand swap today, so
+    without this every option card would just repeat 'Same brand' and hide
+    the one thing a customer actually needs to notice: pack size/format
+    (e.g. '6 x 200ml instead of 1L') and whether the price really matches."""
+    points: List[ComparisonPoint] = []
+
+    if candidate["brand"] == original_product["brand"]:
+        points.append(ComparisonPoint(label=f"Same brand ({candidate['brand']})", kind="match"))
+    else:
+        points.append(ComparisonPoint(label=f"Different brand ({candidate['brand']})", kind="difference"))
+
+    original_price = original_product["unit_price"]
+    candidate_price = candidate["unit_price"]
+    if abs(candidate_price - original_price) < 1e-9:
+        points.append(ComparisonPoint(label=f"Same price (£{candidate_price:.2f})", kind="match"))
+    else:
+        points.append(
+            ComparisonPoint(
+                label=f"£{candidate_price:.2f} instead of £{original_price:.2f}", kind="difference"
+            )
+        )
+
+    original_pack = _extract_pack_descriptor(original_product["product_name"])
+    candidate_pack = _extract_pack_descriptor(candidate["product_name"])
+    if original_pack and candidate_pack:
+        if original_pack.lower() == candidate_pack.lower():
+            points.append(ComparisonPoint(label=f"Same size ({candidate_pack})", kind="match"))
+        else:
+            points.append(
+                ComparisonPoint(label=f"{candidate_pack} instead of {original_pack}", kind="difference")
+            )
+
+    return points
 
 
 def rank_alternatives(
@@ -93,17 +141,9 @@ def rank_alternatives(
             )
             continue
 
-        reasons = [
-            f"Same brand: {product['brand']}",
-            f"Same category: {product['category']}",
-            f"In stock at {store_name} ({qty_at_store} available)",
-            "Price within customer's allowed limit",
-        ]
-        package_score, package_reason = _package_similarity_score(
+        package_score, _package_reason = _package_similarity_score(
             original_product["product_name"], product["product_name"]
         )
-        if package_reason:
-            reasons.append(package_reason)
         qty_score = _quantity_score(qty_at_store)
 
         score = min(100, 60 + package_score + qty_score)
@@ -116,7 +156,7 @@ def rank_alternatives(
                 unit_price=product["unit_price"],
                 available_quantity=qty_at_store,
                 score=score,
-                reasons=reasons,
+                comparison_points=_comparison_points(original_product, product),
             )
         )
 
